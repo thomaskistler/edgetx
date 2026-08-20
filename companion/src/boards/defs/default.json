@@ -1,0 +1,62 @@
+{
+  "comments": [
+    "This file is always loaded first, then hwdefn, then variations overlaid in basedOn sequence",
+    "hidden: true prevents the name being displayed in any ui lists",
+    "Some entries are future proofing eg external modules and for parsing consistency",
+    "Some values are used for field initialisation only"
+  ],
+  "hidden": true,
+  "name": "Default",
+  "auxSerialMode": false,
+  "aux2SerialMode": false,
+  "battery": {
+    "comments": "",
+    "min": 0,
+    "max": 0,
+    "warn": 0
+  },
+  "bluetoothName": "unknown",
+  "chargeWhileOn": false,
+  "externalAntenna": false,
+  "hardwareAntennaSwitch": false,
+  "hats": false,
+  "imu": false,
+  "internalGPS": false,
+  "modules": [
+    {
+      "internal": {
+        "comments": "refer external for complete list",
+        "available": [
+          "elrs",
+          "multi"
+        ],
+        "default": "elrs"
+      }
+    },
+    {
+      "external": {
+        "comments": "available replaces size in modules refactor",
+        "size": "std",
+        "available": [
+          "crsf",
+          "dsm2",
+          "elrs",
+          "ghost",
+          "lemon-dsmp",
+          "multi",
+          "ppm",
+          "sbus"
+        ]
+      }
+    }
+  ],
+  "pwrButtonPress": true,
+  "rotaryEncNav": true,
+  "softwareSerialPower": false,
+  "stickDeadZone": false,
+  "switchableJack": false,
+  "topLCD": false,
+  "trainerModule": "none",
+  "vcpSerialMode": false,
+  "voiceControl": false
+}
