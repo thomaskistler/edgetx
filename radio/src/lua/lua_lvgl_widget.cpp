@@ -19,14 +19,14 @@
  * GNU General Public License for more details.
  */
 
-#include "lua_widget.h"
-
+#include "api_colorlcd.h"
 #include "color_picker.h"
 #include "dialog.h"
 #include "edgetx.h"
 #include "filechoice.h"
 #include "keyboard_base.h"
 #include "lua_event.h"
+#include "lua_widget.h"
 #include "menu.h"
 #include "numberedit.h"
 #include "page.h"
@@ -720,7 +720,7 @@ void LvglWidgetObjectBase::clearChildRefs(lua_State *L)
     lua_rawgeti(L, LUA_REGISTRYINDEX, lvglObjectRefs[i]);
     auto p = LvglWidgetObjectBase::checkLvgl(L, -1);
     lua_pop(L, 1);
-    if (p) p->clearRefs(L);
+    if (p) p->release(L);
   }
   lvglObjectRefs.clear();
 }
@@ -1984,10 +1984,135 @@ void LvglWidgetArc::build(lua_State *L)
 
 //-----------------------------------------------------------------------------
 
+void LvglWidgetImage::create(lua_State *L, int index)
+{
+  lua_pushlightuserdata(L, this);
+  lua_pushcclosure(L, [](lua_State* L) {
+    auto self = (LvglWidgetImage*)lua_touserdata(L, lua_upvalueindex(1));
+    self->LvglWidgetObjectBase::create(L, 1);
+    return 0;
+  }, 1);
+  lua_pushvalue(L, index < 0 ? index - 1 : index);
+  if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+    clearRefs(L);
+    if (window) window->closeWindow();
+    delete this;
+    lua_error(L);
+  }
+}
+
+void LvglWidgetImage::getParams(lua_State* L, int index)
+{
+  if (hasDeletedWindow()) luaL_error(L, "Image window has been deleted");
+  LvglWidgetObjectBase::getParams(L, index);
+  // Parsed last, so a rejected property never replaces the source.
+  parseSource(L, index);
+}
+
+void LvglWidgetImage::releaseSource(lua_State* L)
+{
+  clearBitmap(L);
+  filename.clearRef(L);
+  filename.txt.clear();
+}
+
+void LvglWidgetImage::parseSource(lua_State* L, int index)
+{
+  // Resolve both fields once, independently of lua_next iteration order.
+  // Raw lookups keep __index metamethods from running during the update.
+  index = lua_absindex(L, index);
+  lua_pushliteral(L, "file");
+  lua_rawget(L, index);
+  lua_pushliteral(L, "bitmap");
+  lua_rawget(L, index);
+  bool hasFile = !lua_isnil(L, -2);
+  bool hasBitmap = !lua_isnil(L, -1);
+  bool clear = lua_isboolean(L, -1) && !lua_toboolean(L, -1);
+  if (hasFile && hasBitmap && !clear)
+    luaL_error(L, "Specify either file or bitmap, not both");
+  if (!hasFile && !hasBitmap) {
+    lua_pop(L, 2);
+    return;
+  }
+
+  // Validate and acquire the new source before releasing the old one, so
+  // errors leave the current image untouched.
+  if (hasBitmap && !clear) {
+    auto bitmap = checkBitmap(L, -1);
+    if (!bitmap || !bitmap->getData() || !bitmap->width() || !bitmap->height())
+      luaL_error(L, "Cannot display an unloaded Bitmap");
+    if (bitmap->width() > 2047 || bitmap->height() > 2047)
+      luaL_error(L, "Bitmap dimensions exceed the LVGL image header limit");
+
+    uint32_t size = 0;
+    if (bitmap->getFormat() == BMP_ARGB4444) {
+      size = bitmap->width() * bitmap->height() * 3u;
+      if (size > LUA_MEM_EXTRA_MAX ||
+          luaExtraMemoryUsage > LUA_MEM_EXTRA_MAX - size)
+        luaL_error(L,
+                   "Bitmap image conversion exceeds Lua bitmap memory limit");
+    } else if (bitmap->getFormat() != BMP_RGB565) {
+      luaL_error(L, "Unsupported Bitmap pixel format");
+    }
+
+    lua_pushvalue(L, -1);
+    int ref = ::getRef(L, LUA_REGISTRYINDEX);
+    uint8_t* pixels = nullptr;
+    if (size) {
+      pixels = (uint8_t*)malloc(size);
+      if (!pixels) {
+        clearRef(L, ref);
+        luaL_error(L, "Cannot allocate Bitmap image conversion");
+      }
+      // LVGL needs RGB565 + alpha, not the legacy packed ARGB4444 layout.
+      const auto src = bitmap->getData();
+      for (uint32_t i = 0; i < bitmap->width() * bitmap->height(); ++i) {
+        auto c = src[i];
+        auto r = ((c >> 8) & 15) * 17;
+        auto g = ((c >> 4) & 15) * 17;
+        auto b = (c & 15) * 17;
+        uint16_t rgb = RGB(r, g, b);
+        pixels[i * 3] = rgb & 255;
+        pixels[i * 3 + 1] = rgb >> 8;
+        pixels[i * 3 + 2] = (c >> 12) * 17;
+      }
+    }
+
+    releaseSource(L);
+    bitmapRef = ref;
+    bitmapPixels = pixels;
+    bitmapPixelsSize = size;
+    luaExtraMemoryUsage += size;
+    bitmapDescriptor.header.cf =
+        pixels ? LV_IMG_CF_TRUE_COLOR_ALPHA : LV_IMG_CF_TRUE_COLOR;
+    bitmapDescriptor.header.w = bitmap->width();
+    bitmapDescriptor.header.h = bitmap->height();
+    bitmapDescriptor.data_size = pixels ? size : bitmap->getDataSize();
+    bitmapDescriptor.data =
+        pixels ? pixels : (const uint8_t*)bitmap->getData();
+  } else {
+    int ref = LUA_REFNIL;
+    const char* path = "";
+    if (hasFile && lua_isfunction(L, -2)) {
+      lua_pushvalue(L, -2);
+      ref = ::getRef(L, LUA_REGISTRYINDEX);
+    } else if (hasFile) {
+      path = luaL_checkstring(L, -2);
+    }
+    releaseSource(L);
+    filename.function = ref;
+    filename.txt = path;
+    filename.forceUpdate();
+  }
+  sourceChanged = true;
+  lua_pop(L, 2);
+}
+
 void LvglWidgetImage::parseParam(lua_State *L, const char *key)
 {
-  if (!strcmp(key, "file")) {
-    filename.parse(L);
+  if (!key) luaL_error(L, "Invalid image property");
+  if (!strcmp(key, "file") || !strcmp(key, "bitmap")) {
+    return;
   } else if (!strcmp(key, "fill")) {
     fillFrame = getLuaBool(L);
   } else {
@@ -1997,6 +2122,7 @@ void LvglWidgetImage::parseParam(lua_State *L, const char *key)
 
 bool LvglWidgetImage::callRefs(lua_State *L)
 {
+  if (!window) return true;
   if (!LvglWidgetObject::callRefs(L)) return false;
 
   if (isVisible()) {
@@ -2019,14 +2145,60 @@ bool LvglWidgetImage::callRefs(lua_State *L)
 
 void LvglWidgetImage::clearRefs(lua_State *L)
 {
+  clearBitmap(L);
+  if (window) {
+    lv_obj_remove_event_cb_with_user_data(window->getLvObj(), windowDeleted,
+                                          this);
+  }
   filename.clearRef(L);
   LvglWidgetObject::clearRefs(L);
+}
+
+void LvglWidgetImage::windowDeleted(lv_event_t* event)
+{
+  auto self = (LvglWidgetImage*)lv_event_get_user_data(event);
+  self->window = nullptr;
+  self->clearBitmap(self->bitmapState);
+  self->bitmapState = nullptr;
+}
+
+void LvglWidgetImage::clearBitmap(lua_State* L)
+{
+  if (bitmapRef != LUA_REFNIL) {
+    if (window) ((StaticImage*)window)->clearSource();
+    lv_img_cache_invalidate_src(&bitmapDescriptor);
+    clearRef(L, bitmapRef);
+  }
+  free(bitmapPixels);
+  bitmapPixels = nullptr;
+  luaExtraMemoryUsage -= bitmapPixelsSize;
+  bitmapPixelsSize = 0;
+  bitmapDescriptor = {};
+}
+
+void LvglWidgetImage::refresh()
+{
+  if (!window) return;
+  LvglWidgetObject::refresh();
+  if (!sourceChanged) return;
+  sourceChanged = false;
+  if (bitmapRef != LUA_REFNIL)
+    ((StaticImage*)window)->setSource(&bitmapDescriptor);
+  else
+    ((StaticImage*)window)->setSource(filename.chars());
 }
 
 void LvglWidgetImage::build(lua_State *L)
 {
   window = new StaticImage(lvglManager->getCurrentParent(), {x, y, w, h},
                            filename.chars(), fillFrame);
+  lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_MAINTHREAD);
+  bitmapState = lua_tothread(L, -1);
+  lua_pop(L, 1);
+  lv_obj_add_event_cb(window->getLvObj(), windowDeleted, LV_EVENT_DELETE, this);
+  if (bitmapRef != LUA_REFNIL)
+    ((StaticImage*)window)->setSource(&bitmapDescriptor);
+  sourceChanged = false;
   setFloating(floating);
 }
 

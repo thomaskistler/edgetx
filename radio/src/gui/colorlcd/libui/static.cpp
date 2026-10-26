@@ -244,9 +244,25 @@ void StaticImage::setSource(std::string filename)
   }
 }
 
+void StaticImage::setSource(const lv_img_dsc_t* bitmap)
+{
+  if (!image) image = lv_img_create(lvobj);
+  lv_obj_set_size(image, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_img_set_src(image, bitmap);
+  lv_obj_center(image);
+  setZoom();
+}
+
 void StaticImage::clearSource()
 {
   if (image) lv_obj_del(image);
+  image = nullptr;
+}
+
+void StaticImage::clear()
+{
+  Window::clear();
+  // lv_obj_clean() has deleted the image object.
   image = nullptr;
 }
 
