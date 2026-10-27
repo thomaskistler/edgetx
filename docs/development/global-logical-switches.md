@@ -261,9 +261,9 @@ does not itself provide refreshed existing stick values. Reuse normal source
 processing rather than introducing an independent control path, and verify
 sampling/response timing in the implementation.
 
-Global Functions execute after mixing. Verify end-to-end trainer takeover
-latency, including when the trainer action affects mixing, not just when the
-GL latch changes.
+Global Functions execute after mixing. Verify end-to-end latency from a GL
+change to its effect on outputs, including actions that affect mixing, not just
+when the GL latch changes.
 
 Relevant code: `radio/src/tasks/mixer_task.cpp:229-265`,
 `radio/src/mixer.cpp:787-792,1174-1255,1383-1388`.
@@ -275,13 +275,10 @@ model throttle reversal and, for Trainer "Sticks", trainer substitution to those
 values. The ADC filter also permits a model jitter-filter override.
 
 Use existing source access and change-detection logic. No new calibration
-algorithm, independent ADC snapshot, filter, or trainer-bypass read path is
-required.
+algorithm, independent ADC snapshot, or filter is required.
 
-Trainer "Channels" substitutes student channels later in `applyLimits()`,
-without replacing the instructor stick sources. Moving takeover detection from
-processed model Inputs to stick sources bypasses Input rates/expo and requires
-an appropriate movement threshold.
+Stick sources bypass Input rates/expo, so movement conditions on them need
+thresholds chosen for raw stick values.
 
 Function-switch conditions must read hardware position, not the model latch
 state. `getSwitch()` currently returns `g_model.cfsState()` for function
@@ -289,8 +286,6 @@ switches, so GL evaluation needs its own read path for these IDs. The HAL
 provides `switchGetPosition()`/`switchState()` for this purpose.
 
 Relevant code: `radio/src/mixer.cpp:373-387,597-669`,
-`radio/src/mixer.cpp:270-281`,
-`radio/src/functions.cpp:236-245`,
 `radio/src/hal/adc_driver.cpp:334-352,361-377,441-478`,
 `radio/src/hal/switch_driver.cpp:98-143`,
 `radio/src/input_mapping.cpp:111-124`,
