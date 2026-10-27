@@ -95,8 +95,8 @@ nav:
     - CLI Commands: development/cli-commands.md
     - Code Generation: development/code-generation.md
     - Control Inputs: development/control-inputs.md
-    - Global Logical Switches (Draft): development/global-logical-switches.md
     - External Module Protocols: development/external-module-protocols.md
+    - Global Logical Switches (Draft): development/global-logical-switches.md
     - YAML Parser/Generator: development/yaml-parser-generator.md
     - Mixer Synchronisation: development/mixer-synchronisation.md
 
