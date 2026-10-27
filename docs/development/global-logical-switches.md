@@ -33,8 +33,8 @@ GL definitions may reference:
 - Local calibrated pots/sliders, without model-specific center/reverse settings.
 - Configured multiposition-pot positions.
 - Physical switch positions.
-- Physical pressed/released states of configurable function-switch buttons,
-  not their model-specific toggle/group states.
+- Configurable function-switch states, using the active model's configured
+  toggle/group behavior, as in local logical switches and Special Functions.
 - Physical trim-button presses, not model trim values. Using these conditions
   does not itself suppress normal trimming.
 - Radio battery voltage, radio activity, and trainer-connected status.
@@ -118,12 +118,17 @@ Thereafter, normal function and timing semantics apply.
 
 ### Function-switch conditions
 
-Function-switch IDs are shared between contexts but read differently. In GL
-definitions, a function-switch position means the physical button state. In
-model logic and Special Functions, the same ID means the model's toggle/group
-state (`cfsState`). Editors and Companion must show which meaning applies, for
-example with distinct labels or help text in the GL editor. Lua discovery must
-document the difference.
+Function-switch conditions use the same meaning in GL, local logical switches,
+and Special Functions: the active model's configured state (`cfsState`), not
+the physical button's pressed/released state. A shared GL definition can
+therefore behave differently across models with different function-switch
+configurations. GL runtime state still resets on model change.
+
+Reuse existing switch labels and selectors in the radio editor and Companion.
+Help text and Lua documentation must explain that these conditions follow the
+active model's configuration. Separate raw button-press conditions are outside
+the scope of this version. Function-switch group numeric sources remain
+excluded.
 
 ## Monitoring and outputs
 
@@ -280,14 +285,14 @@ algorithm, independent ADC snapshot, or filter is required.
 Stick sources bypass Input rates/expo, so movement conditions on them need
 thresholds chosen for raw stick values.
 
-Function-switch conditions must read hardware position, not the model latch
-state. `getSwitch()` currently returns `g_model.cfsState()` for function
-switches, so GL evaluation needs its own read path for these IDs. The HAL
-provides `switchGetPosition()`/`switchState()` for this purpose.
+Function-switch conditions must use the existing `getSwitch()` path, which
+returns `g_model.cfsState()` for function switches. No separate hardware-read
+path is needed. Ensure the active model's function-switch state is initialized
+and updated before GL evaluation.
 
 Relevant code: `radio/src/mixer.cpp:373-387,597-669`,
 `radio/src/hal/adc_driver.cpp:334-352,361-377,441-478`,
-`radio/src/hal/switch_driver.cpp:98-143`,
+`radio/src/switches.cpp:715-723`,
 `radio/src/input_mapping.cpp:111-124`,
 `radio/src/gui/gui_common.cpp:1433-1450`.
 
