@@ -5,12 +5,9 @@ control behavior once and use it across models, instead of copying and
 maintaining the same logical-switch chains in every model. The motivating
 example is shared trainer-control logic: latch student control, return control
 to the instructor when the instructor moves a stick or uses an override switch,
-and trigger the corresponding announcements. Stick-movement takeover requires
-the trainer function in "Channels" mode; see
-[Trainer modes and stick takeover](#trainer-modes-and-stick-takeover).
-Shared switch gestures, such as double/triple clicks, are another use case.
-Global logical switches should be usable by both Global Functions and model
-settings.
+and trigger the corresponding announcements. Shared switch gestures, such as
+double/triple clicks, are another use case. Global logical switches should be
+usable by both Global Functions and model settings.
 
 ## Version target
 
@@ -32,8 +29,7 @@ GL definitions may reference:
 - Other global logical switches, including inverted conditions.
 - Existing stick sources, using their current EdgeTX semantics. These bypass
   model Input rates/expo but retain existing trainer-stick substitution,
-  throttle reversal, and jitter-filter behavior where applicable. See
-  [Trainer modes and stick takeover](#trainer-modes-and-stick-takeover).
+  throttle reversal, and jitter-filter behavior where applicable.
 - Local calibrated pots/sliders, without model-specific center/reverse settings.
 - Configured multiposition-pot positions.
 - Physical switch positions.
@@ -57,20 +53,6 @@ cyclic sources, function-switch group sources, model timers, model telemetry
 channel values. Model logic can depend on GL. GL cannot directly reference
 these model-defined signals, but permitted built-in sources retain their
 existing processing, including any model-dependent settings.
-
-### Trainer modes and stick takeover
-
-Stick sources keep their existing trainer behavior. When the trainer function
-substitutes sticks (Trainer "Sticks", replace mode), `evalInputs()` writes the
-student's value into the stick source, so a GL cannot see the instructor's
-stick movement. In add mode, the stick source is the sum of instructor and
-student, so student movement can also trigger a movement condition.
-
-Detecting instructor stick movement to take back control therefore requires the
-trainer function in "Channels" mode. That mode substitutes student values only
-at the outputs, in `applyLimits()`, and leaves the instructor stick sources
-unchanged. Document this requirement in the user documentation and in any
-example trainer setups. An override switch works in every trainer mode.
 
 ## Functions, timing, and dependencies
 
@@ -294,9 +276,7 @@ values. The ADC filter also permits a model jitter-filter override.
 
 Use existing source access and change-detection logic. No new calibration
 algorithm, independent ADC snapshot, filter, or trainer-bypass read path is
-required. As a consequence, instructor stick takeover requires Trainer
-"Channels" mode; see
-[Trainer modes and stick takeover](#trainer-modes-and-stick-takeover).
+required.
 
 Trainer "Channels" substitutes student channels later in `applyLimits()`,
 without replacing the instructor stick sources. Moving takeover detection from
