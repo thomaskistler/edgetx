@@ -9,6 +9,14 @@ and trigger the corresponding announcements. Shared switch gestures, such as
 double/triple clicks, are another use case. Global logical switches should be
 usable by both Global Functions and model settings.
 
+**Related feature request:** [#5125: Global Logical Switches](https://github.com/EdgeTX/edgetx/issues/5125).
+This draft specifies the proposed feature; it does not implement or close the
+request.
+
+**Background discussions:**
+[#7176: Global "Logical Switches" ??](https://github.com/EdgeTX/edgetx/discussions/7176)
+and [#3342: Some logical switches for radio setup (for global functions)](https://github.com/EdgeTX/edgetx/discussions/3342).
+
 ## Version target
 
 Proposed target: EdgeTX 3.0 and its UI, with matching Companion support.
