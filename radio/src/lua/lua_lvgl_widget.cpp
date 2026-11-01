@@ -26,6 +26,7 @@
 #include "edgetx.h"
 #include "filechoice.h"
 #include "keyboard_base.h"
+#include "lib_file.h"
 #include "lua_event.h"
 #include "menu.h"
 #include "numberedit.h"
@@ -2028,6 +2029,152 @@ void LvglWidgetImage::build(lua_State *L)
   window = new StaticImage(lvglManager->getCurrentParent(), {x, y, w, h},
                            filename.chars(), fillFrame);
   setFloating(floating);
+}
+
+//-----------------------------------------------------------------------------
+
+// The image is scaled to fit the frame when it is decoded, so the frame must
+// have a real size. The area is limited so that a script cannot ask for an
+// image that would use up the memory of the radio, while still allowing
+// frames larger than the display, e.g. inside a scrollable container.
+static bool validBitmapFrame(coord_t w, coord_t h)
+{
+  return !LV_COORD_IS_SPEC(w) && !LV_COORD_IS_SPEC(h) && w > 0 && h > 0 &&
+         (int32_t)w * h <= 4 * LCD_W * LCD_H;
+}
+
+void LvglWidgetBitmap::parseParam(lua_State *L, const char *key)
+{
+  if (!strcmp(key, "file")) {
+    if (!lua_isfunction(L, -1) && !lua_isstring(L, -1))
+      luaL_error(L, "lvgl.bitmap: file must be a string or a function");
+    discardStagedFile(L);
+    fileStaged = true;
+    if (lua_isfunction(L, -1))
+      stagedFunction = ::getRef(L, LUA_REGISTRYINDEX);
+    else
+      stagedText = lua_tostring(L, -1);
+  } else {
+    LvglWidgetObject::parseParam(L, key);
+  }
+}
+
+void LvglWidgetBitmap::discardStagedFile(lua_State *L)
+{
+  ::clearRef(L, stagedFunction);
+  stagedText.clear();
+  fileStaged = false;
+}
+
+// A new file replaces any previous source, string or function
+void LvglWidgetBitmap::applyStagedFile(lua_State *L)
+{
+  if (!fileStaged) return;
+
+  filename.clearRef(L);
+  filename.function = stagedFunction;
+  filename.txt = stagedText;
+  stagedFunction = LUA_REFNIL;
+  stagedText.clear();
+  fileStaged = false;
+
+  if (filename.function == LUA_REFNIL && loaded != filename.txt) {
+    loaded = filename.txt;
+    needsLoad = true;
+  }
+}
+
+// Decode the requested file at the current frame size
+void LvglWidgetBitmap::load()
+{
+  needsLoad = false;
+  if (!window || window->deleted()) return;
+
+  auto bmp = (StaticBitmap*)window;
+  if (loaded.empty() || !validBitmapFrame(window->width(), window->height())) {
+    bmp->clearSource();
+    return;
+  }
+  char path[FF_MAX_LFN + 1];
+  etxNormalizePath(loaded.c_str(), path, sizeof(path));
+  bmp->setSource(path);
+}
+
+void LvglWidgetBitmap::setSource(const char *s)
+{
+  loaded = s;
+  load();
+}
+
+// Pixels are scaled to the frame when decoded, so a new size needs a reload
+void LvglWidgetBitmap::setSize(coord_t w, coord_t h)
+{
+  if (window && window->deleted()) return;
+
+  bool resized = window && (window->width() != w || window->height() != h);
+  LvglWidgetObject::setSize(w, h);
+  if (resized) {
+    // During an update the decode is done once, at the end
+    if (refreshing)
+      needsLoad = true;
+    else
+      load();
+  }
+}
+
+bool LvglWidgetBitmap::callRefs(lua_State *L)
+{
+  if (!LvglWidgetObject::callRefs(L)) return false;
+
+  if (isVisible()) {
+    return pcallUpdateStringVal(L, filename.function, [=](const char *s) {
+      if (loaded != s) setSource(s);
+    });
+  }
+
+  return true;
+}
+
+void LvglWidgetBitmap::update(lua_State *L)
+{
+  // Drop whatever an earlier update that failed left staged
+  discardStagedFile(L);
+  getParams(L, 2);
+  applyStagedFile(L);
+  refresh();
+}
+
+void LvglWidgetBitmap::refresh()
+{
+  // The handle outlives its window until the parent clears its references
+  if (window && window->deleted()) return;
+
+  refreshing = true;
+  LvglWidgetObject::refresh();
+  refreshing = false;
+  if (needsLoad) load();
+}
+
+void LvglWidgetBitmap::clearRefs(lua_State *L)
+{
+  discardStagedFile(L);
+  filename.clearRef(L);
+  LvglWidgetObject::clearRefs(L);
+}
+
+void LvglWidgetBitmap::build(lua_State *L)
+{
+  if (getSizeFunction == LUA_REFNIL && !validBitmapFrame(w, h)) {
+    discardStagedFile(L);
+    luaL_error(L,
+               "lvgl.bitmap: w and h must be set to sizes from 1, covering "
+               "at most four times the display area");
+  }
+
+  window = new StaticBitmap(lvglManager->getCurrentParent(), {x, y, w, h});
+  setFloating(floating);
+  applyStagedFile(L);
+  if (needsLoad) load();
 }
 
 //-----------------------------------------------------------------------------
