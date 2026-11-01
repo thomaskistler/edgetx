@@ -117,7 +117,9 @@ class BitmapBuffer
                                   BitmapFormats fmt = BMP_INVALID);
 
   // Scale to fit the frame, keeping RGB565 or converting ARGB4444 to LVGL alpha.
-  // Returns false, leaving the bitmap unchanged, for an invalid frame or OOM.
+  // Returns false, leaving the bitmap unchanged, for invalid geometry or OOM.
+  // Scaled dimensions must fit LVGL's 11-bit image descriptor.
+  static constexpr coord_t MAX_LVGL_IMAGE_DIMENSION = (1 << 11) - 1;
   bool resizeToLVGL(coord_t w, coord_t h);
 
   coord_t drawSizedText(coord_t x, coord_t y, const char* s, uint8_t len,

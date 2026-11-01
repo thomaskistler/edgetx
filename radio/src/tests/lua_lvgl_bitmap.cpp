@@ -24,6 +24,8 @@
 #if defined(LUA) && defined(COLORLCD)
 
 #include <memory>
+#include <limits>
+#include <vector>
 
 #include "edgetx.h"
 #include "lua/api_colorlcd.h"
@@ -69,8 +71,28 @@ class CountingBitmap : public LvglWidgetBitmap
 {
  public:
   unsigned loads = 0;
+  unsigned* destructionCount = nullptr;
+  bool failAfterFileStage = false;
+  using LvglWidgetBitmap::pcallGetStringVal;
+
+  bool hasPendingFile() const
+  {
+    return fileStaged || stagedFunction != LUA_REFNIL;
+  }
+
+  ~CountingBitmap() override
+  {
+    if (destructionCount) ++*destructionCount;
+  }
 
  protected:
+  void parseParam(lua_State* L, const char* key) override
+  {
+    LvglWidgetBitmap::parseParam(L, key);
+    if (failAfterFileStage && !strcmp(key, "file"))
+      luaL_error(L, "simulated parameter error after staging file");
+  }
+
   void load() override
   {
     ++loads;
@@ -85,7 +107,8 @@ class LuaLvglBitmap : public ::testing::Test
   LuaScriptManager* previousManager = nullptr;
   BitmapScriptManager manager;
   int expectedErrors = 0;
-  std::unique_ptr<CountingBitmap> countedBitmap;
+  unsigned bitmapDestructions = 0;
+  CountingBitmap* countedBitmap = nullptr;
 
   static void SetUpTestSuite() { lv_stb_init(); }
 
@@ -108,7 +131,7 @@ class LuaLvglBitmap : public ::testing::Test
     manager.root->closeWindow();
     MainWindow::instance()->run();
     lua_close(L);
-    countedBitmap.reset();
+    countedBitmap = nullptr;
     luaScriptManager = previousManager;
   }
 
@@ -123,11 +146,13 @@ class LuaLvglBitmap : public ::testing::Test
   {
     ASSERT_FALSE(countedBitmap);
     ASSERT_TRUE(exec("params=" + params));
-    countedBitmap = std::make_unique<CountingBitmap>();
+    auto object = std::make_unique<CountingBitmap>();
+    object->destructionCount = &bitmapDestructions;
     lua_getglobal(L, "params");
-    countedBitmap->create(L, -1);
+    object->create(L, -1);
     lua_pop(L, 1);
-    countedBitmap->push(L);
+    object->push(L);
+    countedBitmap = object.release();
     lua_setglobal(L, "bmp");
   }
 
@@ -415,7 +440,8 @@ TEST_F(LuaLvglBitmap, FunctionErrorsAreReportedNotThrown)
   ASSERT_TRUE(exec(std::string("bmp=lvgl.bitmap({w=80,h=60,file='") + kFileA +
                    "'}); bmp:set({file=function() return {} end})"));
   expectedErrors = 1;
-  EXPECT_TRUE(manager.callRefs(L));
+  EXPECT_FALSE(manager.callRefs(L));
+  manager.luaShowError();
   EXPECT_TRUE(bitmap()->hasImage());
 }
 
@@ -453,8 +479,8 @@ TEST_F(LuaLvglBitmap, ClosedWindowIgnoresLateSourceChanges)
   auto window = bitmap();
   window->closeWindow();
   uint32_t screens = lv_disp_get_default()->screen_cnt;
-  ASSERT_TRUE(exec(std::string("bmp:set({file='") + kFileB + "'})"));
-  ASSERT_TRUE(exec("lvgl.clear(bmp)"));
+  ASSERT_TRUE(exec(std::string("assert(not pcall(bmp.set,bmp,{file='") +
+                   kFileB + "'})); assert(not pcall(lvgl.clear,bmp))"));
   EXPECT_EQ(lv_disp_get_default()->screen_cnt, screens);
   EXPECT_FALSE(window->hasImage());
 }
@@ -749,6 +775,349 @@ TEST_F(LuaLvglBitmap, ClearReleasesPixels)
                    "',w=80,h=60}); lvgl.clear()"));
   MainWindow::instance()->run();
   EXPECT_EQ(lv_obj_get_child_cnt(manager.root->getLvObj()), 0);
+}
+
+class RegistryFailureAllocator
+{
+ public:
+  lua_Alloc original = nullptr;
+  void* originalData = nullptr;
+  bool failGrowth = false;
+  bool failTables = false;
+  unsigned failures = 0;
+
+  static void* allocate(void* context, void* ptr, size_t oldSize,
+                         size_t newSize)
+  {
+    auto self = static_cast<RegistryFailureAllocator*>(context);
+    bool reject = self->failTables
+                      ? !ptr && oldSize == LUA_TTABLE && newSize != 0
+                      : newSize > oldSize && (ptr || oldSize == 0);
+    if (self->failGrowth && reject) {
+      ++self->failures;
+      return nullptr;
+    }
+    return self->original(self->originalData, ptr, oldSize, newSize);
+  }
+
+  static int arm(lua_State* L)
+  {
+    auto self = static_cast<RegistryFailureAllocator*>(
+        lua_touserdata(L, lua_upvalueindex(1)));
+    auto count = lua_rawlen(L, LUA_REGISTRYINDEX);
+    for (lua_Integer i = count + 1; i <= 1024; ++i) {
+      lua_pushboolean(L, true);
+      lua_rawseti(L, LUA_REGISTRYINDEX, i);
+    }
+    lua_pushinteger(L, 0);
+    lua_rawseti(L, LUA_REGISTRYINDEX, 0);
+    lua_pushinteger(L, 80);
+    lua_pushinteger(L, 60);
+    self->failGrowth = true;
+    return 2;
+  }
+
+  static int armNextAllocation(lua_State* L)
+  {
+    auto self = static_cast<RegistryFailureAllocator*>(
+        lua_touserdata(L, lua_upvalueindex(1)));
+    self->failGrowth = true;
+    return 0;
+  }
+};
+
+TEST_F(LuaLvglBitmap, RegistryAllocationFailureLeavesNoDanglingFinalizer)
+{
+  RegistryFailureAllocator allocator;
+  allocator.original = lua_getallocf(L, &allocator.originalData);
+  lua_pushlightuserdata(L, &allocator);
+  lua_pushcclosure(L, RegistryFailureAllocator::arm, 1);
+  lua_setglobal(L, "arm");
+  lua_setallocf(L, RegistryFailureAllocator::allocate, &allocator);
+  auto result = exec(std::string("ok,msg=pcall(lvgl.bitmap,{file='") +
+                     kFileA + "',size=arm})");
+  allocator.failGrowth = false;
+  lua_setallocf(L, allocator.original, allocator.originalData);
+  ASSERT_TRUE(result);
+  ASSERT_GT(allocator.failures, 0u);
+  ASSERT_TRUE(exec("assert(not ok, msg)"));
+  lua_getglobal(L, "msg");
+  EXPECT_NE(strstr(lua_tostring(L, -1), "memory"), nullptr);
+  lua_pop(L, 1);
+  EXPECT_TRUE(manager.getLvglObjectRefs().empty());
+  EXPECT_EQ(lv_obj_get_child_cnt(manager.root->getLvObj()), 0u);
+  lua_gc(L, LUA_GCCOLLECT, 0);
+}
+
+TEST_F(LuaLvglBitmap, BuildResultAllocationFailureRestoresTheParent)
+{
+  RegistryFailureAllocator allocator;
+  allocator.original = lua_getallocf(L, &allocator.originalData);
+  allocator.failTables = true;
+  lua_pushlightuserdata(L, &allocator);
+  lua_pushcclosure(L, RegistryFailureAllocator::armNextAllocation, 1);
+  lua_setglobal(L, "arm");
+  lua_setallocf(L, RegistryFailureAllocator::allocate, &allocator);
+  auto result = exec("parent=lvgl.box({w=100,h=100});"
+                     "params={}; arm(); ok,msg=pcall(lvgl.build,parent,params)");
+  allocator.failGrowth = false;
+  lua_setallocf(L, allocator.original, allocator.originalData);
+  ASSERT_TRUE(result);
+  EXPECT_GT(allocator.failures, 0u);
+  EXPECT_EQ(manager.getTempParent(), nullptr);
+  ASSERT_TRUE(exec("assert(not ok); parent:set({x=1});"
+                   "bmp=lvgl.bitmap({w=40,h=30})"));
+  EXPECT_EQ(bitmap()->getParent(), manager.root);
+}
+
+TEST_F(LuaLvglBitmap, ClearThenDynamicUpdateUsesTheFinalFrameOnce)
+{
+  createCountedBitmap(std::string("{w=80,h=60,file='") + kFileA + "'}");
+  ASSERT_NE(countedBitmap, nullptr);
+  countedBitmap->loads = 0;
+  ASSERT_TRUE(exec(std::string("lvgl.clear(bmp); bmp:set({file='") + kFileB +
+                   "',size=function() return 40,30 end})"));
+  ASSERT_TRUE(manager.callRefs(L));
+  EXPECT_EQ(pixels()->header.w, 40);
+  EXPECT_EQ(pixels()->header.h, 22);
+  EXPECT_EQ(countedBitmap->loads, 1u);
+  ASSERT_TRUE(manager.callRefs(L));
+  EXPECT_EQ(countedBitmap->loads, 1u);
+}
+
+TEST_F(LuaLvglBitmap, ScaledDimensionsMustFitTheImageDescriptor)
+{
+  const char* file = "images/color/bitmap_dimension_limits.bmp";
+  uint8_t bytes[54 + 64 * 3] = {'B', 'M', 246};
+  bytes[10] = 54;
+  bytes[14] = 40;
+  bytes[18] = 64;
+  bytes[22] = 1;
+  bytes[26] = 1;
+  bytes[28] = 24;
+  bytes[34] = 192;
+  FIL handle;
+  ASSERT_EQ(f_open(&handle, file, FA_CREATE_NEW | FA_WRITE), FR_OK);
+  UINT written = 0;
+  EXPECT_EQ(f_write(&handle, bytes, sizeof(bytes), &written), FR_OK);
+  EXPECT_EQ(written, sizeof(bytes));
+  EXPECT_EQ(f_close(&handle), FR_OK);
+  auto oversized = exec(std::string("bmp=lvgl.bitmap({w=4096,h=64,file='") +
+                        file + "'})");
+  bool rejected = oversized && !bitmap()->hasImage();
+  auto valid = exec("bmp:set({w=2047,h=32})");
+  int width = 0, height = 0;
+  if (valid && bitmap()->hasImage()) {
+    width = pixels()->header.w;
+    height = pixels()->header.h;
+  }
+  EXPECT_EQ(f_unlink(file), FR_OK);
+  ASSERT_TRUE(oversized);
+  ASSERT_TRUE(valid);
+  EXPECT_TRUE(rejected);
+  EXPECT_EQ(width, 2047);
+  EXPECT_EQ(height, 31);
+}
+
+TEST_F(LuaLvglBitmap, RejectedScalingPreservesOwnedAndBorrowedStorage)
+{
+  pixel_t pixels[] = {0x1234};
+  for (auto format : {BMP_RGB565, BMP_ARGB4444}) {
+    BitmapBuffer buffer(format, 64, 1);
+    auto data = buffer.getData();
+    ASSERT_NE(data, nullptr);
+    EXPECT_FALSE(buffer.resizeToLVGL(2048, 32));
+    EXPECT_EQ(buffer.getData(), data);
+    EXPECT_EQ(buffer.width(), 64);
+    EXPECT_EQ(buffer.height(), 1);
+  }
+  BitmapBuffer borrowed(BMP_RGB565, 1, 1, pixels);
+  EXPECT_FALSE(borrowed.resizeToLVGL(2048, 2048));
+  EXPECT_EQ(borrowed.getData(), pixels);
+  EXPECT_EQ(pixels[0], 0x1234);
+}
+
+TEST_F(LuaLvglBitmap, HiddenAncestorCannotKeepClearedDescendantsValid)
+{
+  ASSERT_TRUE(exec(std::string("outer=lvgl.box({w=100,h=100});"
+                               "inner=lvgl.box(outer,{w=100,h=100});"
+                               "bmp=lvgl.bitmap(inner,{file='") +
+                   kFileA + "',w=80,h=60}); lvgl.hide(outer); lvgl.clear(inner)"));
+  MainWindow::instance()->run();
+  ASSERT_TRUE(exec("assert(not pcall(bmp.set,bmp,{x=1}));"
+                   "assert(not pcall(lvgl.show,bmp));"
+                   "assert(not pcall(lvgl.clear,bmp))"));
+  ASSERT_TRUE(manager.callRefs(L));
+}
+
+TEST_F(LuaLvglBitmap, ClearRebuildKeepsOnlyTheNewChildHandles)
+{
+  ASSERT_TRUE(exec("parent=lvgl.box({w=100,h=100});"
+                   "old=lvgl.bitmap(parent,{w=80,h=60});"
+                   "lvgl.hide(parent); lvgl.clear(parent);"
+                   "new=lvgl.bitmap(parent,{w=40,h=30});"
+                   "assert(not pcall(old.set,old,{x=1}));"
+                   "new:set({x=2}); lvgl.show(parent)"));
+  ASSERT_TRUE(manager.callRefs(L));
+  MainWindow::instance()->run();
+  ASSERT_TRUE(exec("new:set({x=3})"));
+}
+
+TEST_F(LuaLvglBitmap, ClearedHandlesRetainTheirWrapperOnlyUntilGc)
+{
+  createCountedBitmap(std::string("{w=80,h=60,file='") + kFileA + "'}");
+  ASSERT_NE(countedBitmap, nullptr);
+  ASSERT_TRUE(exec("lvgl.clear()"));
+  MainWindow::instance()->run();
+  lua_gc(L, LUA_GCCOLLECT, 0);
+  EXPECT_EQ(bitmapDestructions, 0u);
+  ASSERT_TRUE(exec("assert(not pcall(bmp.set,bmp,{x=1})); bmp=nil"));
+  lua_gc(L, LUA_GCCOLLECT, 0);
+  EXPECT_EQ(bitmapDestructions, 1u);
+  countedBitmap = nullptr;
+}
+
+TEST_F(LuaLvglBitmap, ExternalWindowClosureInvalidatesRetainedHandles)
+{
+  createCountedBitmap(std::string("{w=80,h=60,file='") + kFileA + "'}");
+  ASSERT_NE(countedBitmap, nullptr);
+  bitmap()->closeWindow();
+  MainWindow::instance()->run();
+  ASSERT_TRUE(exec("assert(not pcall(bmp.set,bmp,{x=1}))"));
+  ASSERT_TRUE(manager.callRefs(L));
+  EXPECT_TRUE(manager.getLvglObjectRefs().empty());
+  ASSERT_TRUE(exec("bmp=nil"));
+  lua_gc(L, LUA_GCCOLLECT, 0);
+  EXPECT_EQ(bitmapDestructions, 1u);
+  countedBitmap = nullptr;
+}
+
+TEST_F(LuaLvglBitmap, DecodedImageDimensionsCannotNarrow)
+{
+  const char* file = "images/color/bitmap_source_dimension_limits.bmp";
+  for (unsigned width : {65535u, 65536u}) {
+    std::vector<uint8_t> bytes(54 + 196608);
+    bytes[0] = 'B';
+    bytes[1] = 'M';
+    bytes[2] = 54;
+    bytes[4] = 3;
+    bytes[10] = 54;
+    bytes[14] = 40;
+    bytes[18] = width & 0xFF;
+    bytes[19] = (width >> 8) & 0xFF;
+    bytes[20] = width >> 16;
+    bytes[22] = 1;
+    bytes[26] = 1;
+    bytes[28] = 24;
+    bytes[36] = 3;
+    FIL handle;
+    ASSERT_EQ(f_open(&handle, file, FA_CREATE_NEW | FA_WRITE), FR_OK);
+    UINT written = 0;
+    EXPECT_EQ(f_write(&handle, bytes.data(), bytes.size(), &written), FR_OK);
+    EXPECT_EQ(written, bytes.size());
+    EXPECT_EQ(f_close(&handle), FR_OK);
+    std::unique_ptr<BitmapBuffer> image(BitmapBuffer::loadBitmap(file));
+    EXPECT_EQ(f_unlink(file), FR_OK);
+    if (width == 65536) {
+      EXPECT_EQ(image, nullptr);
+    } else {
+      ASSERT_NE(image, nullptr);
+      EXPECT_EQ(image->width(), width);
+      EXPECT_TRUE(image->resizeToLVGL(256, 64));
+      EXPECT_EQ(image->width(), 256);
+      EXPECT_EQ(image->height(), 1);
+    }
+  }
+}
+
+TEST_F(LuaLvglBitmap, GrayscalePngAlphaIsPreservedOnBothImagePaths)
+{
+  const char* file = "images/color/bitmap_grayscale_alpha.png";
+  const uint8_t bytes[] = {
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+      0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x04, 0x00, 0x00, 0x00, 0x5e, 0x2b, 0xb7, 0x01, 0x00, 0x00, 0x00,
+      0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x28, 0x67, 0xb8, 0xfb,
+      0x1f, 0x00, 0x04, 0x9a, 0x02, 0x54, 0xd6, 0x57, 0x3f, 0x9f, 0x00, 0x00,
+      0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82};
+  FIL handle;
+  ASSERT_EQ(f_open(&handle, file, FA_CREATE_NEW | FA_WRITE), FR_OK);
+  UINT written = 0;
+  EXPECT_EQ(f_write(&handle, bytes, sizeof(bytes), &written), FR_OK);
+  EXPECT_EQ(written, sizeof(bytes));
+  EXPECT_EQ(f_close(&handle), FR_OK);
+  auto result = exec(std::string("bmp=lvgl.bitmap({w=2,h=1,file='") + file + "'})");
+  if (result && bitmap()->hasImage()) {
+    EXPECT_EQ(pixels()->header.cf, LV_IMG_CF_TRUE_COLOR_ALPHA);
+    EXPECT_EQ(pixels()->data[2], 0);
+    EXPECT_EQ(pixels()->data[5], 255);
+  } else {
+    ADD_FAILURE() << "grayscale-alpha PNG did not load";
+  }
+  lv_img_decoder_dsc_t decoded = {};
+  std::string source = std::string("A/") + file;
+  auto opened =
+      lv_img_decoder_open(&decoded, source.c_str(), lv_color_make(0, 0, 0), 0);
+  if (opened == LV_RES_OK) {
+    EXPECT_EQ(decoded.header.cf, LV_IMG_CF_TRUE_COLOR_ALPHA);
+    EXPECT_EQ(decoded.img_data[2], 0);
+    EXPECT_EQ(decoded.img_data[5], 255);
+    lv_img_decoder_close(&decoded);
+  }
+  EXPECT_EQ(f_unlink(file), FR_OK);
+  EXPECT_EQ(opened, LV_RES_OK);
+  ASSERT_TRUE(result);
+}
+
+TEST_F(LuaLvglBitmap, StringGetterResultSurvivesLuaGarbageCollection)
+{
+  createCountedBitmap("{w=80,h=60}");
+  ASSERT_NE(countedBitmap, nullptr);
+  ASSERT_TRUE(exec("getter=function() return string.rep('x',2000) end"));
+  lua_getglobal(L, "getter");
+  int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  const char* result = countedBitmap->pcallGetStringVal(L, ref);
+  luaL_unref(L, LUA_REGISTRYINDEX, ref);
+  ASSERT_TRUE(exec("getter=nil"));
+  lua_gc(L, LUA_GCCOLLECT, 0);
+  EXPECT_EQ(strlen(result), 2000u);
+  for (unsigned i = 0; i < 2000; ++i) EXPECT_EQ(result[i], 'x');
+}
+
+TEST_F(LuaLvglBitmap, ExtremeAndMissingBuffersFailWithoutOverflow)
+{
+  for (auto format : {BMP_RGB565, BMP_ARGB4444}) {
+    BitmapBuffer oversized(format, 65535, 65535);
+    EXPECT_EQ(oversized.getData(), nullptr);
+    EXPECT_FALSE(oversized.resizeToLVGL(1, 1));
+    BitmapBuffer small(format, 1, 1);
+    auto data = small.getData();
+    ASSERT_NE(data, nullptr);
+    EXPECT_FALSE(small.resizeToLVGL(std::numeric_limits<coord_t>::max(),
+                                    std::numeric_limits<coord_t>::max()));
+    EXPECT_EQ(small.getData(), data);
+  }
+  pixel_t pixel = 0;
+  BitmapBuffer borrowed(BMP_RGB565, 1, 1, &pixel);
+  borrowed.setData(nullptr);
+  EXPECT_FALSE(borrowed.resizeToLVGL(1, 1));
+}
+
+TEST_F(LuaLvglBitmap, RejectedUpdatesReleaseStagedCallbacksImmediately)
+{
+  createCountedBitmap(std::string("{w=80,h=60,file='") + kFileA + "'}");
+  ASSERT_NE(countedBitmap, nullptr);
+  countedBitmap->loads = 0;
+  countedBitmap->failAfterFileStage = true;
+  markPixels();
+  ASSERT_TRUE(exec(std::string("local callback=function() return '") + kFileB +
+                   "' end; weak=setmetatable({callback},{__mode='v'});"
+                   "assert(not pcall(bmp.set,bmp,{file=callback}))"));
+  EXPECT_FALSE(countedBitmap->hasPendingFile());
+  lua_gc(L, LUA_GCCOLLECT, 0);
+  ASSERT_TRUE(exec("assert(weak[1] == nil)"));
+  EXPECT_EQ(countedBitmap->loads, 0u);
+  EXPECT_TRUE(pixelsMarked());
 }
 
 }  // namespace
