@@ -433,10 +433,9 @@ static int protectedCreate(lua_State *L)
   return 1;
 }
 
-// Create obj from the params table on top of the stack and leave the new
-// object there. If this fails nothing is left behind: callbacks are released,
-// the window and any children built so far are closed, and the temporary
-// parent is back to prevParent.
+// Create obj from the params table on top of the stack and leave it there.
+// On failure, release its references and remove its LVGL object before freeing
+// the C++ wrapper, which may own buffers still referenced by LVGL.
 static int createLvglObject(lua_State *L, LvglWidgetObjectBase *obj,
                             bool hasChildren, LvglWidgetObjectBase *prevParent)
 {
@@ -448,7 +447,7 @@ static int createLvglObject(lua_State *L, LvglWidgetObjectBase *obj,
   luaScriptManager->setTempParent(prevParent);
   if (status != LUA_OK) {
     obj->clearRefs(L);
-    if (obj->getWindow()) obj->getWindow()->closeWindow();
+    obj->destroyLvglObject();
     delete obj;
     return rethrowLvglError(L);
   }
@@ -903,9 +902,9 @@ LROT_BEGIN(lvgllib, NULL, 0)
 
   @retval table LVGL object
 
-  @notice `w` and `h` are required (or `size` must be a function) and the frame may cover at most four times the display area, otherwise an error is raised. The image is scaled to fit entirely within the frame at load time, keeping its aspect ratio, and centered. Changing the frame size reloads the file.
-  @notice The file is only decoded when the source changes. Replacing it with the same path does nothing. A file that cannot be loaded, or that does not fit in memory, leaves the object blank and is not retried until the file or frame size changes.
-  @notice If `file` is a function it is only called while the object is visible.
+  @notice At creation, `w` and `h` must specify a positive pixel size (or `size` must be a function) and the frame may cover at most four times the display area, otherwise an error is raised. An invalid frame supplied at runtime clears the image without decoding. The image is scaled to fit entirely within the frame at load time, keeping its aspect ratio, and centered. Changing the frame size reloads the file.
+  @notice The file is only decoded when the source or frame size changes. Setting the same path without changing the frame does not reload it. A file that cannot be loaded, or that does not fit in memory, leaves the object blank and is not retried until the file or frame size changes.
+  @notice If `file` is a function it is only called while the object is visible. When `file` or `size` is a function, queued changes are decoded together during the next visible callback refresh, after both the filename and frame size are known. An empty string still clears the source immediately.
   @notice While it holds an image, each object uses 2 bytes per pixel for opaque images (such as JPEG) and 3 bytes per pixel for images with transparency, measured at the scaled size. This memory is not counted against the Lua bitmap memory limit. Images with transparency are reduced to 4 bits per color channel.
 
   @status current Introduced in 3.0.0

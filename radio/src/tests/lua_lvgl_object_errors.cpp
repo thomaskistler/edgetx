@@ -64,12 +64,14 @@ class LuaLvglObjectErrors : public ::testing::Test
  protected:
   lua_State* L = nullptr;
   LuaScriptManager* previousManager = nullptr;
+  our_longjmp* previousPanicChain = nullptr;
   ErrorScriptManager manager;
 
   static void SetUpTestSuite() { lv_stb_init(); }
 
   void SetUp() override
   {
+    previousPanicChain = global_lj;
     L = luaL_newstate();
     ASSERT_NE(L, nullptr);
     lua_atpanic(L, &custom_lua_atpanic);
@@ -82,6 +84,8 @@ class LuaLvglObjectErrors : public ::testing::Test
 
   void TearDown() override
   {
+    // Isolate the shared callback helper's pre-existing panic-chain leak.
+    global_lj = previousPanicChain;
     EXPECT_EQ(manager.errors, 0);
     manager.clearRefs(L);
     manager.root->closeWindow();
@@ -128,6 +132,20 @@ TEST_F(LuaLvglObjectErrors, FailedChildrenLeaveNoWindowBehind)
   auto other = LvglWidgetObjectBase::checkLvgl(L, -1, true)->getWindow();
   lua_pop(L, 1);
   EXPECT_EQ(other->getParent(), manager.root);
+}
+
+TEST_F(LuaLvglObjectErrors, FailedLineCallbacksLeaveNoLvglObjects)
+{
+  ASSERT_TRUE(exec("assert(not pcall(lvgl.line,{"
+                   "pts={{0,0},{10,10}},pos=function() return {},0 end}))"));
+  EXPECT_EQ(lv_obj_get_child_cnt(manager.root->getLvObj()), 0u);
+}
+
+TEST_F(LuaLvglObjectErrors, FailedLabelCallbacksLeaveNoLvglObjects)
+{
+  ASSERT_TRUE(exec("assert(not pcall(lvgl.label,{"
+                   "text=function() return {} end}))"));
+  EXPECT_EQ(lv_obj_get_child_cnt(manager.root->getLvObj()), 0u);
 }
 
 TEST_F(LuaLvglObjectErrors, FailedBuildRestoresTheParent)

@@ -269,6 +269,7 @@ class LvglWidgetObjectBase
 
   void create(lua_State *L, int index);
   virtual void update(lua_State *L);
+  virtual void destroyLvglObject();
 
   virtual Window *getWindow() const = 0;
 
@@ -326,6 +327,7 @@ class LvglSimpleWidgetObject : public LvglWidgetObjectBase
   void setPos(coord_t x, coord_t y) override;
   void setSize(coord_t w, coord_t h) override;
   void setFloating(bool isFloating) override;
+  void destroyLvglObject() override;
 
   Window *getWindow() const override { return nullptr; }
 
@@ -707,7 +709,6 @@ class LvglWidgetBitmap : public LvglWidgetObject
   std::string stagedText;
 
   bool needsLoad = false;
-  bool refreshing = false;
 
   void build(lua_State *L) override;
   void refresh() override;
@@ -715,7 +716,7 @@ class LvglWidgetBitmap : public LvglWidgetObject
 
   void discardStagedFile(lua_State *L);
   void applyStagedFile(lua_State *L);
-  void load();
+  virtual void load();
   void setSource(const char *s);
 };
 

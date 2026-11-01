@@ -23,6 +23,8 @@
 
 #if defined(LUA) && defined(COLORLCD)
 
+#include <memory>
+
 #include "edgetx.h"
 #include "lua/api_colorlcd.h"
 #include "lua/lua_widget.h"
@@ -63,6 +65,19 @@ class BitmapScriptManager : public LuaScriptManager
 const char* const kFileA = "images/color/bitmap_320x240.png";
 const char* const kFileB = "images/color/bitmap_480x272.png";
 
+class CountingBitmap : public LvglWidgetBitmap
+{
+ public:
+  unsigned loads = 0;
+
+ protected:
+  void load() override
+  {
+    ++loads;
+    LvglWidgetBitmap::load();
+  }
+};
+
 class LuaLvglBitmap : public ::testing::Test
 {
  protected:
@@ -70,6 +85,7 @@ class LuaLvglBitmap : public ::testing::Test
   LuaScriptManager* previousManager = nullptr;
   BitmapScriptManager manager;
   int expectedErrors = 0;
+  std::unique_ptr<CountingBitmap> countedBitmap;
 
   static void SetUpTestSuite() { lv_stb_init(); }
 
@@ -92,6 +108,7 @@ class LuaLvglBitmap : public ::testing::Test
     manager.root->closeWindow();
     MainWindow::instance()->run();
     lua_close(L);
+    countedBitmap.reset();
     luaScriptManager = previousManager;
   }
 
@@ -100,6 +117,18 @@ class LuaLvglBitmap : public ::testing::Test
     if (luaL_dostring(L, code.c_str()))
       return ::testing::AssertionFailure() << lua_tostring(L, -1);
     return ::testing::AssertionSuccess();
+  }
+
+  void createCountedBitmap(const std::string& params)
+  {
+    ASSERT_FALSE(countedBitmap);
+    ASSERT_TRUE(exec("params=" + params));
+    countedBitmap = std::make_unique<CountingBitmap>();
+    lua_getglobal(L, "params");
+    countedBitmap->create(L, -1);
+    lua_pop(L, 1);
+    countedBitmap->push(L);
+    lua_setglobal(L, "bmp");
   }
 
   StaticBitmap* bitmap(const char* name = "bmp")
@@ -194,6 +223,110 @@ TEST_F(LuaLvglBitmap, OpaqueImagesScaleToFitFrame)
   EXPECT_EQ(pixels()->header.h, 128);
 }
 
+TEST_F(LuaLvglBitmap, OpaqueScalingPaintsEveryDestinationPixel)
+{
+  std::unique_ptr<BitmapBuffer> decoded(
+      BitmapBuffer::loadBitmap(kFileA, BMP_RGB565));
+  ASSERT_NE(decoded, nullptr);
+
+  struct Frame {
+    coord_t w, h, scaledw, scaledh;
+  };
+  const Frame frames[] = {
+      {100, 40, 53, 40}, {40, 100, 40, 30}, {79, 41, 54, 41},
+      {53, 53, 53, 39}, {13, 7, 9, 7},     {1, 1, 1, 1},
+      {320, 240, 320, 240}, {641, 481, 641, 480}};
+  for (const auto& frame : frames) {
+    auto b = new StaticBitmap(manager.root, {0, 0, frame.w, frame.h},
+                              kFileA, BMP_RGB565);
+    ASSERT_TRUE(b->hasImage());
+    auto c = (lv_canvas_t*)lv_obj_get_child(b->getLvObj(), 0);
+    ASSERT_NE(c, nullptr);
+    ASSERT_EQ(c->dsc.header.cf, LV_IMG_CF_TRUE_COLOR);
+    ASSERT_EQ(c->dsc.header.w, frame.scaledw);
+    ASSERT_EQ(c->dsc.header.h, frame.scaledh);
+    auto data = (const pixel_t*)c->dsc.data;
+    float scale = min(float(frame.w) / decoded->width(),
+                      float(frame.h) / decoded->height());
+    for (coord_t y = 0; y < frame.scaledh; ++y) {
+      for (coord_t x = 0; x < frame.scaledw; ++x) {
+        auto expected = *decoded->getPixelPtrAbs(
+            min((coord_t)(x / scale), (coord_t)decoded->width() - 1),
+            min((coord_t)(y / scale), (coord_t)decoded->height() - 1));
+        ASSERT_EQ(data[y * frame.scaledw + x], expected)
+            << "frame " << frame.w << "x" << frame.h << ", pixel "
+            << x << "," << y;
+      }
+    }
+    b->closeWindow();
+  }
+}
+
+TEST_F(LuaLvglBitmap, OneToOneOpaqueConversionKeepsItsBuffer)
+{
+  std::unique_ptr<BitmapBuffer> decoded(
+      BitmapBuffer::loadBitmap(kFileA, BMP_RGB565));
+  ASSERT_NE(decoded, nullptr);
+  auto data = decoded->getData();
+  ASSERT_TRUE(decoded->resizeToLVGL(320, 240));
+  EXPECT_EQ(decoded->getData(), data);
+}
+
+TEST_F(LuaLvglBitmap, OversizedConversionLeavesItsBufferUnchanged)
+{
+  for (auto format : {BMP_RGB565, BMP_ARGB4444}) {
+    BitmapBuffer buffer(format, 1, 1);
+    auto data = buffer.getData();
+    ASSERT_NE(data, nullptr);
+    ASSERT_FALSE(buffer.resizeToLVGL(65536, 65536));
+    EXPECT_EQ(buffer.getData(), data);
+    EXPECT_EQ(buffer.width(), 1);
+    EXPECT_EQ(buffer.height(), 1);
+  }
+}
+
+TEST_F(LuaLvglBitmap, ResizingBorrowedPixelsDoesNotFreeTheirStorage)
+{
+  pixel_t pixels[] = {0x1234};
+  {
+    BitmapBuffer buffer(BMP_RGB565, 1, 1, pixels);
+    ASSERT_TRUE(buffer.resizeToLVGL(2, 2));
+    EXPECT_NE(buffer.getData(), pixels);
+    for (int i = 0; i < 4; ++i)
+      EXPECT_EQ(buffer.getData()[i], pixels[0]);
+  }
+  EXPECT_EQ(pixels[0], 0x1234);
+}
+
+TEST_F(LuaLvglBitmap, ForcedAlphaScalingKeepsTheExistingPixelConversion)
+{
+  const char* file = "images/color/edgetx.png";
+  std::unique_ptr<BitmapBuffer> decoded(
+      BitmapBuffer::loadBitmap(file, BMP_ARGB4444));
+  ASSERT_NE(decoded, nullptr);
+  auto b = new StaticBitmap(manager.root, {0, 0, 50, 50},
+                            file, BMP_ARGB4444);
+  ASSERT_TRUE(b->hasImage());
+  auto c = (lv_canvas_t*)lv_obj_get_child(b->getLvObj(), 0);
+  ASSERT_NE(c, nullptr);
+  ASSERT_EQ(c->dsc.header.cf, LV_IMG_CF_TRUE_COLOR_ALPHA);
+  float scale = min(50.0f / decoded->width(), 50.0f / decoded->height());
+  for (coord_t y = 0; y < c->dsc.header.h; ++y) {
+    for (coord_t x = 0; x < c->dsc.header.w; ++x) {
+      auto pixel = *decoded->getPixelPtrAbs(
+          (coord_t)(x / scale), (coord_t)(y / scale));
+      ARGB_SPLIT(pixel, a, r, g, blue);
+      auto expected = RGB_JOIN((r * 31 + 7) / 15,
+                               (g * 63 + 7) / 15,
+                               (blue * 31 + 7) / 15);
+      auto data = &c->dsc.data[(y * c->dsc.header.w + x) * 3];
+      ASSERT_EQ(data[0], expected & 0xFF);
+      ASSERT_EQ(data[1], expected >> 8);
+      ASSERT_EQ(data[2], a * 17);
+    }
+  }
+}
+
 TEST_F(LuaLvglBitmap, TransparentImagesKeepAlpha)
 {
   ASSERT_TRUE(exec("bmp=lvgl.bitmap({file='images/color/edgetx.png',"
@@ -224,6 +357,25 @@ TEST_F(LuaLvglBitmap, FramesLargerThanTheDisplayAreAllowed)
   EXPECT_EQ(pixels()->header.h, LCD_H);
 }
 
+TEST_F(LuaLvglBitmap, OverflowingOrNarrowedFramesAreRejected)
+{
+  ASSERT_TRUE(exec("assert(not pcall(lvgl.bitmap,{w=65536,h=65536}))"));
+  ASSERT_TRUE(exec("assert(not pcall(lvgl.bitmap,{w=4294967376,h=60}))"));
+  ASSERT_TRUE(exec("assert(not pcall(lvgl.bitmap,{w=80,h=4294967356}))"));
+  ASSERT_TRUE(exec("assert(not pcall(lvgl.bitmap,{w=-4294967216,h=60}))"));
+  EXPECT_EQ(lv_obj_get_child_cnt(manager.root->getLvObj()), 0u);
+}
+
+TEST_F(LuaLvglBitmap, FrameAreaBoundaryIsExact)
+{
+  auto w = std::to_string(LCD_W * 2);
+  auto h = std::to_string(LCD_H * 2);
+  auto oversizedW = std::to_string(LCD_W * 2 + 1);
+  ASSERT_TRUE(exec("assert(pcall(lvgl.bitmap,{w=" + w + ",h=" + h + "}))"));
+  ASSERT_TRUE(exec("assert(not pcall(lvgl.bitmap,{w=" + oversizedW +
+                   ",h=" + h + "}))"));
+}
+
 TEST_F(LuaLvglBitmap, SizeFunctionProvidesTheFrame)
 {
   ASSERT_TRUE(exec(std::string("bmp=lvgl.bitmap({file='") + kFileA +
@@ -231,6 +383,19 @@ TEST_F(LuaLvglBitmap, SizeFunctionProvidesTheFrame)
   ASSERT_TRUE(bitmap()->hasImage());
   EXPECT_EQ(pixels()->header.w, 80);
   EXPECT_EQ(pixels()->header.h, 60);
+}
+
+TEST_F(LuaLvglBitmap, SizeMustBeAFunction)
+{
+  ASSERT_TRUE(exec("for _,v in ipairs({7,false,'size',{}}) do "
+                   "assert(not pcall(lvgl.bitmap,{size=v})) end"));
+  EXPECT_EQ(lv_obj_get_child_cnt(manager.root->getLvObj()), 0u);
+  ASSERT_TRUE(exec(std::string("calls=0; bmp=lvgl.bitmap({file='") + kFileA +
+                   "',size=function() calls=calls+1; return 80,60 end});"
+                   "assert(not pcall(bmp.set,bmp,{size=7})); calls=0"));
+  EXPECT_TRUE(manager.callRefs(L));
+  EXPECT_TRUE(exec("assert(calls == 1)"));
+  EXPECT_TRUE(bitmap()->hasImage());
 }
 
 TEST_F(LuaLvglBitmap, InvalidFileValueKeepsThePreviousSource)
@@ -329,18 +494,96 @@ TEST_F(LuaLvglBitmap, RejectedUpdateWithFunctionLeavesTheStringSource)
 
 TEST_F(LuaLvglBitmap, ChangingFileAndSizeInOneUpdateDecodesOnce)
 {
-  ASSERT_TRUE(exec(std::string("bmp=lvgl.bitmap({x=0,y=0,w=80,h=60,file='") +
-                   kFileA + "'})"));
-  // Both the file and the frame change. Mark the old pixels: if the old file
-  // were first reloaded at the new size, the new file would be decoded over a
-  // buffer that had just been replaced; the end result must be the new file
-  // at the new size either way, with exactly one image attached.
+  createCountedBitmap(std::string("{w=80,h=60,file='") + kFileA + "'}");
+  ASSERT_NE(countedBitmap, nullptr);
+  countedBitmap->loads = 0;
   markPixels();
   ASSERT_TRUE(exec(std::string("bmp:set({w=40,h=30,file='") + kFileB + "'})"));
   EXPECT_EQ(lv_obj_get_child_cnt(bitmap()->getLvObj()), 1u);
   EXPECT_EQ(pixels()->header.w, 40);
   EXPECT_EQ(pixels()->header.h, 22);
   EXPECT_FALSE(pixelsMarked());
+  EXPECT_EQ(countedBitmap->loads, 1u);
+  EXPECT_TRUE(manager.callRefs(L));
+  EXPECT_EQ(countedBitmap->loads, 1u);
+}
+
+TEST_F(LuaLvglBitmap, FileFunctionAndSizeChangeDecodeOnce)
+{
+  createCountedBitmap(std::string("{w=80,h=60,file='") + kFileA + "'}");
+  ASSERT_NE(countedBitmap, nullptr);
+  countedBitmap->loads = 0;
+  markPixels();
+  ASSERT_TRUE(exec(std::string("bmp:set({w=40,h=30,file=function() return '") +
+                   kFileB + "' end})"));
+  EXPECT_EQ(countedBitmap->loads, 0u);
+  EXPECT_TRUE(pixelsMarked());
+  EXPECT_TRUE(manager.callRefs(L));
+  EXPECT_EQ(countedBitmap->loads, 1u);
+  EXPECT_EQ(pixels()->header.w, 40);
+  EXPECT_EQ(pixels()->header.h, 22);
+}
+
+TEST_F(LuaLvglBitmap, SizeFunctionAndFileChangeDecodeOnce)
+{
+  createCountedBitmap(std::string("{w=80,h=60,file='") + kFileA + "'}");
+  ASSERT_NE(countedBitmap, nullptr);
+  countedBitmap->loads = 0;
+  ASSERT_TRUE(exec(std::string("bmp:set({file='") + kFileB +
+                   "',size=function() return 40,30 end})"));
+  EXPECT_EQ(countedBitmap->loads, 0u);
+  EXPECT_TRUE(manager.callRefs(L));
+  EXPECT_EQ(countedBitmap->loads, 1u);
+  EXPECT_EQ(pixels()->header.w, 40);
+  EXPECT_EQ(pixels()->header.h, 22);
+}
+
+TEST_F(LuaLvglBitmap, DynamicFileAndSizeChangeDecodeOnce)
+{
+  ASSERT_TRUE(exec(std::string("name='") + kFileA + "'; fw=80; fh=60"));
+  createCountedBitmap("{file=function() return name end,"
+                      "size=function() return fw,fh end}");
+  ASSERT_NE(countedBitmap, nullptr);
+  EXPECT_EQ(countedBitmap->loads, 1u);
+  countedBitmap->loads = 0;
+  ASSERT_TRUE(exec(std::string("name='") + kFileB + "'; fw=40; fh=30"));
+  EXPECT_TRUE(manager.callRefs(L));
+  EXPECT_EQ(countedBitmap->loads, 1u);
+  EXPECT_EQ(pixels()->header.w, 40);
+  EXPECT_EQ(pixels()->header.h, 22);
+  EXPECT_TRUE(manager.callRefs(L));
+  EXPECT_EQ(countedBitmap->loads, 1u);
+}
+
+TEST_F(LuaLvglBitmap, ConstructionUsesTheFinalDynamicFrame)
+{
+  createCountedBitmap(std::string("{w=80,h=60,file='") + kFileB +
+                      "',size=function() return 40,30 end}");
+  ASSERT_NE(countedBitmap, nullptr);
+  EXPECT_EQ(countedBitmap->loads, 1u);
+  EXPECT_EQ(pixels()->header.w, 40);
+  EXPECT_EQ(pixels()->header.h, 22);
+}
+
+TEST_F(LuaLvglBitmap, HiddenDynamicUpdatesWaitAndEmptyFileClearsImmediately)
+{
+  createCountedBitmap(std::string("{w=80,h=60,file='") + kFileA +
+                      "',size=function() return 80,60 end}");
+  ASSERT_NE(countedBitmap, nullptr);
+  countedBitmap->loads = 0;
+  markPixels();
+  ASSERT_TRUE(exec(std::string("lvgl.hide(bmp); bmp:set({file='") + kFileB +
+                   "',size=function() return 40,30 end})"));
+  EXPECT_TRUE(manager.callRefs(L));
+  EXPECT_EQ(countedBitmap->loads, 0u);
+  EXPECT_TRUE(pixelsMarked());
+  ASSERT_TRUE(exec("lvgl.show(bmp)"));
+  EXPECT_TRUE(manager.callRefs(L));
+  EXPECT_EQ(countedBitmap->loads, 1u);
+  EXPECT_EQ(pixels()->header.w, 40);
+  EXPECT_EQ(pixels()->header.h, 22);
+  ASSERT_TRUE(exec("lvgl.hide(bmp); bmp:set({file=''})"));
+  EXPECT_FALSE(bitmap()->hasImage());
 }
 
 TEST_F(LuaLvglBitmap, SuccessfulConstructionStillReturnsTheObject)

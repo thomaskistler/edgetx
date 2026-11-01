@@ -116,7 +116,8 @@ class BitmapBuffer
   static BitmapBuffer* loadBitmap(const char* filename,
                                   BitmapFormats fmt = BMP_INVALID);
 
-  // Returns false, leaving the bitmap unchanged, if memory runs out
+  // Scale to fit the frame, keeping RGB565 or converting ARGB4444 to LVGL alpha.
+  // Returns false, leaving the bitmap unchanged, for an invalid frame or OOM.
   bool resizeToLVGL(coord_t w, coord_t h);
 
   coord_t drawSizedText(coord_t x, coord_t y, const char* s, uint8_t len,

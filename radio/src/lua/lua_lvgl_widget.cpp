@@ -21,6 +21,8 @@
 
 #include "lua_widget.h"
 
+#include <limits>
+
 #include "color_picker.h"
 #include "dialog.h"
 #include "edgetx.h"
@@ -352,6 +354,11 @@ LvglWidgetObjectBase::LvglWidgetObjectBase(const char* meta) :
     metatable(meta),
     lvglManager(luaScriptManager)
 {
+}
+
+void LvglWidgetObjectBase::destroyLvglObject()
+{
+  if (auto window = getWindow()) window->closeWindow();
 }
 
 int LvglWidgetObjectBase::getRef(lua_State *L)
@@ -769,6 +776,14 @@ void LvglWidgetObjectBase::update(lua_State *L)
 
 //-----------------------------------------------------------------------------
 
+void LvglSimpleWidgetObject::destroyLvglObject()
+{
+  if (lvobj) {
+    lv_obj_del(lvobj);
+    lvobj = nullptr;
+  }
+}
+
 void LvglSimpleWidgetObject::setPos(coord_t x, coord_t y)
 {
   this->x = x;
@@ -990,7 +1005,7 @@ LvglWidgetLine::LvglWidgetLine() : LvglSimpleWidgetObject()
 LvglWidgetLine::~LvglWidgetLine()
 {
   if (pts)
-    delete pts;
+    delete[] pts;
   pts = nullptr;
 }
 
@@ -1013,7 +1028,7 @@ uint32_t LvglWidgetLine::getPts(lua_State* L)
   if (newPtCnt > 1) {
     ptCnt = newPtCnt;
     if (pts && ptCnt > ptAlloc) {
-      delete pts;
+      delete[] pts;
       pts = nullptr;
     }
     if (!pts) {
@@ -2040,7 +2055,7 @@ void LvglWidgetImage::build(lua_State *L)
 static bool validBitmapFrame(coord_t w, coord_t h)
 {
   return !LV_COORD_IS_SPEC(w) && !LV_COORD_IS_SPEC(h) && w > 0 && h > 0 &&
-         (int32_t)w * h <= 4 * LCD_W * LCD_H;
+         (int64_t)w * h <= 4 * LCD_W * LCD_H;
 }
 
 void LvglWidgetBitmap::parseParam(lua_State *L, const char *key)
@@ -2055,6 +2070,14 @@ void LvglWidgetBitmap::parseParam(lua_State *L, const char *key)
     else
       stagedText = lua_tostring(L, -1);
   } else {
+    if (!strcmp(key, "size") && !lua_isfunction(L, -1))
+      luaL_error(L, "lvgl.bitmap: size must be a function");
+    if (!strcmp(key, "w") || !strcmp(key, "h")) {
+      auto size = luaL_checkinteger(L, -1);
+      if (size < std::numeric_limits<coord_t>::min() ||
+          size > std::numeric_limits<coord_t>::max())
+        luaL_error(L, "lvgl.bitmap: %s is outside the coordinate range", key);
+    }
     LvglWidgetObject::parseParam(L, key);
   }
 }
@@ -2103,7 +2126,7 @@ void LvglWidgetBitmap::load()
 void LvglWidgetBitmap::setSource(const char *s)
 {
   loaded = s;
-  load();
+  needsLoad = true;
 }
 
 // Pixels are scaled to the frame when decoded, so a new size needs a reload
@@ -2113,24 +2136,24 @@ void LvglWidgetBitmap::setSize(coord_t w, coord_t h)
 
   bool resized = window && (window->width() != w || window->height() != h);
   LvglWidgetObject::setSize(w, h);
-  if (resized) {
-    // During an update the decode is done once, at the end
-    if (refreshing)
-      needsLoad = true;
-    else
-      load();
-  }
+  if (resized) needsLoad = true;
 }
 
 bool LvglWidgetBitmap::callRefs(lua_State *L)
 {
   if (!LvglWidgetObject::callRefs(L)) return false;
 
-  if (isVisible()) {
-    return pcallUpdateStringVal(L, filename.function, [=](const char *s) {
-      if (loaded != s) setSource(s);
-    });
-  }
+  bool visible = isVisible();
+  if (visible &&
+      !pcallUpdateStringVal(L, filename.function, [=](const char *s) {
+        if (loaded != s) setSource(s);
+      }))
+    return false;
+
+  if (needsLoad &&
+      (visible || (filename.function == LUA_REFNIL &&
+                   getSizeFunction == LUA_REFNIL)))
+    load();
 
   return true;
 }
@@ -2149,10 +2172,12 @@ void LvglWidgetBitmap::refresh()
   // The handle outlives its window until the parent clears its references
   if (window && window->deleted()) return;
 
-  refreshing = true;
   LvglWidgetObject::refresh();
-  refreshing = false;
-  if (needsLoad) load();
+  // Wait for dynamic filenames or sizes before decoding, but release an
+  // explicitly cleared source immediately, even while hidden.
+  if (needsLoad && filename.function == LUA_REFNIL &&
+      (loaded.empty() || getSizeFunction == LUA_REFNIL))
+    load();
 }
 
 void LvglWidgetBitmap::clearRefs(lua_State *L)
@@ -2174,7 +2199,6 @@ void LvglWidgetBitmap::build(lua_State *L)
   window = new StaticBitmap(lvglManager->getCurrentParent(), {x, y, w, h});
   setFloating(floating);
   applyStagedFile(L);
-  if (needsLoad) load();
 }
 
 //-----------------------------------------------------------------------------

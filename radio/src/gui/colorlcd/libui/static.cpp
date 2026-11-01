@@ -294,36 +294,16 @@ void StaticBitmap::setSource(const char *filename, BitmapFormats fmt)
   img = BitmapBuffer::loadBitmap(filename, fmt);
   if (!img) return;
 
-  if (img->getFormat() == BMP_RGB565) {
-    // Scale to fit the frame, as resizeToLVGL does for images with alpha
-    float scale = min(float(width()) / img->width(),
-                      float(height()) / img->height());
-    coord_t w = img->width() * scale;
-    coord_t h = img->height() * scale;
-    if (w != img->width() || h != img->height()) {
-      auto scaled = new BitmapBuffer(BMP_RGB565, w, h);
-      if (!scaled->getData()) {
-        TRACE_ERROR("StaticBitmap: out of memory scaling '%s'\n", filename);
-        delete scaled;
-        delete img;
-        img = nullptr;
-        return;
-      }
-      scaled->clear();
-      scaled->drawScaledBitmap(img, 0, 0, w, h);
-      delete img;
-      img = scaled;
-    }
-    img->addCanvas(this, LV_IMG_CF_TRUE_COLOR);
-  } else {
-    if (!img->resizeToLVGL(width(), height())) {
-      TRACE_ERROR("StaticBitmap: out of memory scaling '%s'\n", filename);
-      delete img;
-      img = nullptr;
-      return;
-    }
-    img->addCanvas(this, LV_IMG_CF_TRUE_COLOR_ALPHA);
+  if (!img->resizeToLVGL(width(), height())) {
+    TRACE_ERROR("StaticBitmap: unable to scale '%s' to %d x %d\n",
+                filename, width(), height());
+    delete img;
+    img = nullptr;
+    return;
   }
+  img->addCanvas(this, img->getFormat() == BMP_RGB565
+                           ? LV_IMG_CF_TRUE_COLOR
+                           : LV_IMG_CF_TRUE_COLOR_ALPHA);
 }
 
 void StaticBitmap::clearSource()
