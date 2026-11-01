@@ -541,7 +541,7 @@ coord_t BitmapBuffer::drawSizedText(coord_t x, coord_t y, const char *s,
 
 // Resize and convert to LVGL image data format with alpha blending to
 // background color
-void BitmapBuffer::resizeToLVGL(coord_t w, coord_t h)
+bool BitmapBuffer::resizeToLVGL(coord_t w, coord_t h)
 {
   // Scale values from ARGB4444 to RGB565 with alpha
   static uint8_t rbcnv[16] = {0,  2,  4,  6,  8,  10, 12, 14,
@@ -586,5 +586,8 @@ void BitmapBuffer::resizeToLVGL(coord_t w, coord_t h)
     _width = scaledw;
     _height = scaledh;
     data_end = data + ((scaledw * scaledh * 3 + 1) / 2);
+    return true;
   }
+
+  return false;
 }
