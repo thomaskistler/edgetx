@@ -44,6 +44,7 @@ enum LuaLvglType
   ETX_TRIANGLE,
   ETX_IMAGE,
   ETX_QRCODE,
+  ETX_BITMAP,
 
   // Contianers
   ETX_BOX,
@@ -240,11 +241,13 @@ class LvglWidgetObjectBase
 {
  public:
   LvglWidgetObjectBase(const char* meta);
-  virtual ~LvglWidgetObjectBase() {}
+  virtual ~LvglWidgetObjectBase();
 
   int getRef(lua_State *L);
   void push(lua_State *L);
   void saveLvglObjectRef(int ref);
+  void removeLvglObjectRef(int ref);
+  bool valid() const { return !cleared && !nativeDeleted; }
 
   virtual bool callRefs(lua_State *L);
   virtual void clearRefs(lua_State *L);
@@ -267,19 +270,29 @@ class LvglWidgetObjectBase
   virtual void setFloating(bool isFloating) {}
 
   void create(lua_State *L, int index);
-  void update(lua_State *L);
+  virtual void update(lua_State *L);
+  virtual void destroyLvglObject();
 
   virtual Window *getWindow() const = 0;
+  virtual lv_obj_t* getLvglObject() const;
 
   static LvglWidgetObjectBase *checkLvgl(lua_State *L, int index, bool required = false);
+  static LvglWidgetObjectBase* getOwnedObject(lua_State* L, int index);
+  static void destroy(lua_State* L, LvglWidgetObjectBase* obj);
+  static int rethrowError(lua_State* L);
 
   void clear();
+  void requestClose(lua_State* L);
 
  protected:
   int luaRef = LUA_REFNIL;
+  lua_State* state = nullptr;
+  LvglWidgetObjectBase** handle = nullptr;
+  LvglWidgetObjectBase* refParent = nullptr;
   std::vector<int> lvglObjectRefs;
   const char* metatable = nullptr;
-  bool clearRequest = false;
+  bool cleared = false;
+  bool nativeDeleted = false;
   LuaScriptManager *lvglManager = nullptr;
   coord_t x = 0, y = 0, w = LV_SIZE_CONTENT, h = LV_SIZE_CONTENT;
   int getVisibleFunction = LUA_REFNIL;
@@ -288,13 +301,19 @@ class LvglWidgetObjectBase
   LvglParamFuncOrValue color = { .function = LUA_REFNIL, .flags = COLOR2FLAGS(COLOR_THEME_SECONDARY1_INDEX)};
   LvglParamFuncOrValue opacity = { .function = LUA_REFNIL, .value = LV_OPA_COVER};
   bool floating = false;
+  std::string callbackString;
 
   virtual void build(lua_State *L);
   virtual void refresh();
+  virtual void invalidateLvglObject();
+  void watchLvglObject(lv_obj_t* obj);
+  void unwatchLvglObject();
 
   virtual void parseParam(lua_State *L, const char *key);
 
   void getParams(lua_State *L, int index);
+  bool callFunction(lua_State* L, int funcRef,
+                    const std::function<void(lua_State*)>& call);
 
   void pcallSimpleFunc(lua_State *L, int funcRef);
   bool pcallUpdateBool(lua_State *L, int getFuncRef,
@@ -307,8 +326,15 @@ class LvglWidgetObjectBase
   int pcallGetIntVal(lua_State *L, int getFuncRef);
   int pcallGetOptIntVal(lua_State *L, int getFuncRef, int defVal);
   void pcallSetIntVal(lua_State *L, int setFuncRef, int val);
+  void pcallSet2IntVal(lua_State* L, int setFuncRef, int val1, int val2);
   const char* pcallGetStringVal(lua_State *L, int getFuncRef);
   void pcallSetStringVal(lua_State *L, int setFuncRef, const char* val);
+
+ private:
+  lv_obj_t* watchedObject = nullptr;
+  bool closePending = false;
+  static void nativeDeleteEvent(lv_event_t* event);
+  static void deferredClose(void* context);
 };
 
 //-----------------------------------------------------------------------------
@@ -325,11 +351,14 @@ class LvglSimpleWidgetObject : public LvglWidgetObjectBase
   void setPos(coord_t x, coord_t y) override;
   void setSize(coord_t w, coord_t h) override;
   void setFloating(bool isFloating) override;
+  void destroyLvglObject() override;
 
   Window *getWindow() const override { return nullptr; }
+  lv_obj_t* getLvglObject() const override { return lvobj; }
 
  protected:
   lv_obj_t* lvobj = nullptr;
+  void invalidateLvglObject() override;
 };
 
 //-----------------------------------------------------------------------------
@@ -434,7 +463,6 @@ class LvglWidgetLine : public LvglSimpleWidgetObject, public LvglRoundedParam, p
   void setLine();
 
   uint32_t getPts(lua_State* L);
-  void getPt(lua_State* L, int n);
   void build(lua_State *L) override;
   void parseParam(lua_State *L, const char *key) override;
   void refresh() override;
@@ -477,11 +505,11 @@ class LvglWidgetObject : public LvglWidgetObjectBase
  public:
   LvglWidgetObject(const char* meta = LVGL_METATABLE) : LvglWidgetObjectBase(meta) {}
 
-  void show() override { window->show(); }
-  void hide() override { window->hide(); }
-  bool isVisible() override { return window->isVisible(); }
-  void enable() override { window->enable(); }
-  void disable() override { window->disable(); }
+  void show() override { if (window) window->show(); }
+  void hide() override { if (window) window->hide(); }
+  bool isVisible() override { return window && window->isVisible(); }
+  void enable() override { if (window) window->enable(); }
+  void disable() override { if (window) window->disable(); }
 
   void setPos(coord_t x, coord_t y) override;
   void setSize(coord_t w, coord_t h) override;
@@ -494,6 +522,7 @@ class LvglWidgetObject : public LvglWidgetObjectBase
 
  protected:
   Window *window = nullptr;
+  void invalidateLvglObject() override;
   int8_t flexFlow = -1;
   int8_t flexPad = PAD_OUTLINE;
   bool customPad = false;
@@ -678,6 +707,44 @@ class LvglWidgetImage : public LvglWidgetObject
 
   void build(lua_State *L) override;
   void parseParam(lua_State *L, const char *key) override;
+};
+
+//-----------------------------------------------------------------------------
+
+// Image decoded and scaled when the source changes. The decoded pixels are
+// owned by the object, so they never depend on the LVGL image cache.
+class LvglWidgetBitmap : public LvglWidgetObject
+{
+ public:
+  LvglWidgetBitmap() : LvglWidgetObject(LVGL_SIMPLEMETATABLE) {}
+
+  void setSize(coord_t w, coord_t h) override;
+
+  void update(lua_State *L) override;
+  bool callRefs(lua_State *L) override;
+  void clearRefs(lua_State *L) override;
+
+ protected:
+  LvglParamFuncOrString filename = { .function = LUA_REFNIL, .txt = ""};
+  std::string loaded;
+
+  // A new `file` is only parsed here. It replaces the current source once all
+  // the parameters of an update have been accepted.
+  bool fileStaged = false;
+  int stagedFunction = LUA_REFNIL;
+  std::string stagedText;
+
+  bool needsLoad = false;
+
+  void build(lua_State *L) override;
+  void refresh() override;
+  void parseParam(lua_State *L, const char *key) override;
+
+  void discardStagedFile(lua_State *L);
+  void applyStagedFile(lua_State *L);
+  virtual void load();
+  void setSource(const char *s);
+  static int protectedParams(lua_State* L);
 };
 
 //-----------------------------------------------------------------------------
@@ -887,6 +954,8 @@ class LvglWidgetPage : public LvglWidgetObject, public LvglTitleParam, public Lv
 
   coord_t getScrollX() override;
   coord_t getScrollY() override;
+  void destroyLvglObject() override;
+  lv_obj_t* getLvglObject() const override;
 
   void setTitle(const char* s);
   void setSubTitle(const char* s);
@@ -895,6 +964,7 @@ class LvglWidgetPage : public LvglWidgetObject, public LvglTitleParam, public Lv
   LvglParamFuncOrString subtitle = { .function = LUA_REFNIL, .txt = ""};
   std::string iconFile;
   WidgetPage* page = nullptr;
+  void invalidateLvglObject() override;
   bool showBackButton = false;
   bool showNavButtons = false;
 
@@ -918,9 +988,12 @@ class LvglWidgetDialog : public LvglWidgetObject, public LvglTitleParam
 
   void clearRefs(lua_State *L) override;
   void close() override;
+  void destroyLvglObject() override;
+  lv_obj_t* getLvglObject() const override;
 
  protected:
   LvglDialog* dialog = nullptr;
+  void invalidateLvglObject() override;
 
   int closeFunction = LUA_REFNIL;
 
