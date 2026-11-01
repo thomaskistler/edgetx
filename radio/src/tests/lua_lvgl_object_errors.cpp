@@ -148,6 +148,36 @@ TEST_F(LuaLvglObjectErrors, FailedLabelCallbacksLeaveNoLvglObjects)
   EXPECT_EQ(lv_obj_get_child_cnt(manager.root->getLvObj()), 0u);
 }
 
+TEST_F(LuaLvglObjectErrors, FailedPageLeavesNoPageBehind)
+{
+  ASSERT_TRUE(exec("ran=0; assert(not pcall(lvgl.page,{title='t',"
+                   "back=function() ran=ran+1 end,"
+                   "children={{type='bogus'}}}))"));
+  EXPECT_EQ(manager.root->getChildren().size(), 0u);
+  EXPECT_TRUE(exec("assert(ran == 0)"));
+}
+
+TEST_F(LuaLvglObjectErrors, FailedDialogLeavesNoDialogBehind)
+{
+  auto top = Window::topWindow();
+  ASSERT_TRUE(exec("ran=0; assert(not pcall(lvgl.dialog,{title='t',"
+                   "close=function() ran=ran+1 end,"
+                   "children={{type='bogus'}}}))"));
+  EXPECT_EQ(Window::topWindow(), top);
+  EXPECT_TRUE(exec("assert(ran == 0)"));
+}
+
+TEST_F(LuaLvglObjectErrors, PageParamsComeFromTheFirstArgument)
+{
+  ASSERT_TRUE(exec("pg=lvgl.page({title='t',"
+                   "children={{type='label',text='x'}}}, 5);"
+                   "assert(pg ~= nil)"));
+  lua_getglobal(L, "pg");
+  auto body = LvglWidgetObjectBase::checkLvgl(L, -1, true)->getWindow();
+  lua_pop(L, 1);
+  EXPECT_EQ(lv_obj_get_child_cnt(body->getLvObj()), 1u);
+}
+
 TEST_F(LuaLvglObjectErrors, FailedBuildRestoresTheParent)
 {
   ASSERT_TRUE(exec("box=lvgl.box({x=0,y=0,w=100,h=100});"

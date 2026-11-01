@@ -301,9 +301,11 @@ void StaticBitmap::setSource(const char *filename, BitmapFormats fmt)
     img = nullptr;
     return;
   }
-  img->addCanvas(this, img->getFormat() == BMP_RGB565
-                           ? LV_IMG_CF_TRUE_COLOR
-                           : LV_IMG_CF_TRUE_COLOR_ALPHA);
+  auto canvas = img->addCanvas(this, img->getFormat() == BMP_RGB565
+                                         ? LV_IMG_CF_TRUE_COLOR
+                                         : LV_IMG_CF_TRUE_COLOR_ALPHA);
+  // Keep the image behind any child objects
+  lv_obj_move_background(canvas);
 }
 
 void StaticBitmap::clearSource()
@@ -323,6 +325,13 @@ bool StaticBitmap::hasImage() const
 void StaticBitmap::clear()
 {
   deleteChildren();
+  // Also delete plain LVGL children, but keep the image canvas
+  lv_obj_t* canvas = img ? img->getCanvas() : nullptr;
+  for (int i = lvobj ? (int)lv_obj_get_child_cnt(lvobj) - 1 : -1; i >= 0;
+       i -= 1) {
+    auto child = lv_obj_get_child(lvobj, i);
+    if (child != canvas) lv_obj_del(child);
+  }
   invalidate();
 }
 

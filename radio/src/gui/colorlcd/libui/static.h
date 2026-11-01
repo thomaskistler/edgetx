@@ -183,7 +183,7 @@ class StaticBitmap : public Window
   void clearSource();
   bool hasImage() const;
 
-  // Delete child windows only: the image canvas belongs to this object
+  // Delete all children except the image canvas, which belongs to this object
   void clear() override;
 
  protected:

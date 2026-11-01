@@ -454,6 +454,7 @@ TEST_F(LuaLvglBitmap, ClosedWindowIgnoresLateSourceChanges)
   window->closeWindow();
   uint32_t screens = lv_disp_get_default()->screen_cnt;
   ASSERT_TRUE(exec(std::string("bmp:set({file='") + kFileB + "'})"));
+  ASSERT_TRUE(exec("lvgl.clear(bmp)"));
   EXPECT_EQ(lv_disp_get_default()->screen_cnt, screens);
   EXPECT_FALSE(window->hasImage());
 }
@@ -594,6 +595,33 @@ TEST_F(LuaLvglBitmap, SuccessfulConstructionStillReturnsTheObject)
                    "children={{type=lvgl.BITMAP,name='c',w=10,h=10}}}});"
                    "assert(t.b ~= nil)"));
   EXPECT_TRUE(bitmap()->hasImage());
+}
+
+TEST_F(LuaLvglBitmap, ImageStaysBehindChildrenThatClearRemoves)
+{
+  ASSERT_TRUE(exec("bmp=lvgl.bitmap({w=80,h=60,"
+                   "children={{type='label',text='x'}}});"
+                   "lbl=lvgl.label(bmp,{text='y'});"
+                   "box=lvgl.box(bmp,{w=10,h=10})"));
+  auto obj = bitmap()->getLvObj();
+  for (auto file : {kFileA, kFileB}) {
+    ASSERT_TRUE(exec(std::string("bmp:set({file='") + file + "'})"));
+    ASSERT_EQ(lv_obj_get_child_cnt(obj), 4u);
+    EXPECT_TRUE(lv_obj_check_type(lv_obj_get_child(obj, 0), &lv_canvas_class));
+    for (uint32_t i = 1; i < 4; i += 1)
+      EXPECT_FALSE(
+          lv_obj_check_type(lv_obj_get_child(obj, i), &lv_canvas_class));
+  }
+  markPixels();
+
+  ASSERT_TRUE(exec("lvgl.clear(bmp)"));
+  EXPECT_TRUE(manager.callRefs(L));
+  MainWindow::instance()->run();
+  ASSERT_EQ(lv_obj_get_child_cnt(obj), 1u);
+  EXPECT_TRUE(lv_obj_check_type(lv_obj_get_child(obj, 0), &lv_canvas_class));
+  EXPECT_TRUE(pixelsMarked());
+  ASSERT_TRUE(exec("assert(not pcall(lbl.set,lbl,{text='z'}));"
+                   "assert(not pcall(box.set,box,{x=1}))"));
 }
 
 TEST_F(LuaLvglBitmap, SetFileReplacesAndClears)

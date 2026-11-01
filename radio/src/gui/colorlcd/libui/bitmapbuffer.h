@@ -153,6 +153,7 @@ class BitmapBuffer
 
 #if !defined(BOOT)
   lv_obj_t* addCanvas(Window* parent, lv_img_cf_t fmt = LV_IMG_CF_TRUE_COLOR);
+  lv_obj_t* getCanvas() const { return canvas; }
   void removeCanvas();
 #endif
 

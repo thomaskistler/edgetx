@@ -32,8 +32,9 @@ class LvglWidgetParams
  public:
   LvglWidgetParams(lua_State *L, int index = 1)
   {
+    index = lua_absindex(L, index);
     luaL_checktype(L, index, LUA_TTABLE);
-    for (lua_pushnil(L); lua_next(L, -2); lua_pop(L, 1)) {
+    for (lua_pushnil(L); lua_next(L, index); lua_pop(L, 1)) {
       const char *key = lua_tostring(L, -2);
       if (!strcmp(key, "type")) {
         if (lua_isinteger(L, -1)) {
@@ -433,16 +434,18 @@ static int protectedCreate(lua_State *L)
   return 1;
 }
 
-// Create obj from the params table on top of the stack and leave it there.
-// On failure, release its references and remove its LVGL object before freeing
-// the C++ wrapper, which may own buffers still referenced by LVGL.
+// Create obj from the params table at paramsIndex and push the new object.
+// On failure, release its references and remove its LVGL objects before freeing
+// the C++ wrapper, which may own buffers or callbacks still used by LVGL.
 static int createLvglObject(lua_State *L, LvglWidgetObjectBase *obj,
-                            bool hasChildren, LvglWidgetObjectBase *prevParent)
+                            int paramsIndex, bool hasChildren,
+                            LvglWidgetObjectBase *prevParent)
 {
+  paramsIndex = lua_absindex(L, paramsIndex);
   LvglCreateContext ctx = {obj, hasChildren};
   lua_pushcfunction(L, protectedCreate);
   lua_pushlightuserdata(L, &ctx);
-  lua_pushvalue(L, -3);
+  lua_pushvalue(L, paramsIndex);
   int status = lua_pcall(L, 2, 1, 0);
   luaScriptManager->setTempParent(prevParent);
   if (status != LUA_OK) {
@@ -459,7 +462,7 @@ static int luaLvglObj(lua_State *L, std::function<LvglWidgetObject*()> create, b
   if (luaScriptManager && (!fullscreenOnly || luaScriptManager->isFullscreen())) {
     auto prevParent = luaScriptManager->getTempParent();
     LvglWidgetParams params(L, 1);
-    return createLvglObject(L, create(), params.hasChildren, prevParent);
+    return createLvglObject(L, create(), 1, params.hasChildren, prevParent);
   }
 
   lua_pushnil(L);
@@ -476,7 +479,7 @@ static int luaLvglObjEx(lua_State *L, std::function<LvglWidgetObjectBase*()> cre
     }
 
     LvglWidgetParams params(L, -1);
-    return createLvglObject(L, create(), params.hasChildren, prevParent);
+    return createLvglObject(L, create(), -1, params.hasChildren, prevParent);
   }
 
   lua_pushnil(L);

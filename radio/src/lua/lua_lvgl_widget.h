@@ -927,6 +927,7 @@ class LvglWidgetPage : public LvglWidgetObject, public LvglTitleParam, public Lv
 
   coord_t getScrollX() override;
   coord_t getScrollY() override;
+  void destroyLvglObject() override;
 
   void setTitle(const char* s);
   void setSubTitle(const char* s);
@@ -958,6 +959,7 @@ class LvglWidgetDialog : public LvglWidgetObject, public LvglTitleParam
 
   void clearRefs(lua_State *L) override;
   void close() override;
+  void destroyLvglObject() override;
 
  protected:
   LvglDialog* dialog = nullptr;

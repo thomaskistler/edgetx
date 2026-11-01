@@ -2822,6 +2822,13 @@ void LvglWidgetPage::build(lua_State *L)
   }
 }
 
+// The page, not just its body, holds callbacks that reference this object
+void LvglWidgetPage::destroyLvglObject()
+{
+  if (page) page->closeWindow();
+  else LvglWidgetObject::destroyLvglObject();
+}
+
 //-----------------------------------------------------------------------------
 
 class LvglDialog : public BaseDialog
@@ -2879,6 +2886,13 @@ void LvglWidgetDialog::close()
 {
   dialog->onCancel();
   clear();
+}
+
+// The dialog, not just its body, holds callbacks that reference this object
+void LvglWidgetDialog::destroyLvglObject()
+{
+  if (dialog) dialog->closeWindow();
+  else LvglWidgetObject::destroyLvglObject();
 }
 
 //-----------------------------------------------------------------------------
