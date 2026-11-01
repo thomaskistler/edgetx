@@ -22,6 +22,7 @@
 #include "lua_widget.h"
 #include "color_picker.h"
 #include "edgetx.h"
+#include "lib_file.h"
 #include "lua_event.h"
 #include "page.h"
 #include "slider.h"
@@ -2023,6 +2024,104 @@ void LvglWidgetImage::build(lua_State *L)
   window = new StaticImage(lvglManager->getCurrentParent(), {x, y, w, h},
                            filename.chars(), fillFrame);
   setFloating(floating);
+}
+
+//-----------------------------------------------------------------------------
+
+// The image is scaled to fit the frame when it is decoded, so the frame must
+// have a real size. Anything larger than the display could never be seen.
+static bool validBitmapFrame(coord_t w, coord_t h)
+{
+  return !LV_COORD_IS_SPEC(w) && !LV_COORD_IS_SPEC(h) && w > 0 && h > 0 &&
+         w <= LCD_W && h <= LCD_H;
+}
+
+void LvglWidgetBitmap::parseParam(lua_State *L, const char *key)
+{
+  if (!strcmp(key, "file")) {
+    // Check the value before the previous source is replaced
+    if (!lua_isfunction(L, -1)) luaL_checkstring(L, -1);
+    // A new file replaces any previous source, string or function
+    filename.clearRef(L);
+    filename.parse(L);
+  } else {
+    LvglWidgetObject::parseParam(L, key);
+  }
+}
+
+// Decode the requested file at the current frame size
+void LvglWidgetBitmap::load()
+{
+  if (!window || window->deleted()) return;
+
+  auto bmp = (StaticBitmap*)window;
+  if (loaded.empty() || !validBitmapFrame(window->width(), window->height())) {
+    bmp->clearSource();
+    return;
+  }
+  char path[FF_MAX_LFN + 1];
+  etxNormalizePath(loaded.c_str(), path, sizeof(path));
+  bmp->setSource(path);
+}
+
+void LvglWidgetBitmap::setSource(const char *s)
+{
+  loaded = s;
+  load();
+}
+
+// Pixels are scaled to the frame when decoded, so a new size needs a reload
+void LvglWidgetBitmap::setSize(coord_t w, coord_t h)
+{
+  if (window && window->deleted()) return;
+
+  bool resized = window && (window->width() != w || window->height() != h);
+  LvglWidgetObject::setSize(w, h);
+  if (resized) load();
+}
+
+bool LvglWidgetBitmap::callRefs(lua_State *L)
+{
+  if (!LvglWidgetObject::callRefs(L)) return false;
+
+  if (isVisible()) {
+    return pcallUpdateStringVal(L, filename.function, [=](const char *s) {
+      if (loaded != s) setSource(s);
+    });
+  }
+
+  return true;
+}
+
+void LvglWidgetBitmap::refresh()
+{
+  // The handle outlives its window until the parent clears its references
+  if (window && window->deleted()) return;
+
+  LvglWidgetObject::refresh();
+  if (filename.function == LUA_REFNIL && loaded != filename.chars())
+    setSource(filename.chars());
+}
+
+void LvglWidgetBitmap::clearRefs(lua_State *L)
+{
+  filename.clearRef(L);
+  LvglWidgetObject::clearRefs(L);
+}
+
+void LvglWidgetBitmap::build(lua_State *L)
+{
+  if (getSizeFunction == LUA_REFNIL && !validBitmapFrame(w, h)) {
+    filename.clearRef(L);
+    luaL_error(L,
+               "lvgl.bitmap: w and h must be set to sizes from 1 up to the "
+               "display size");
+  }
+
+  window = new StaticBitmap(lvglManager->getCurrentParent(), {x, y, w, h});
+  setFloating(floating);
+  if (filename.function == LUA_REFNIL && !filename.txt.empty())
+    setSource(filename.chars());
 }
 
 //-----------------------------------------------------------------------------
