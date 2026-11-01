@@ -116,7 +116,8 @@ class BitmapBuffer
   static BitmapBuffer* loadBitmap(const char* filename,
                                   BitmapFormats fmt = BMP_INVALID);
 
-  void resizeToLVGL(coord_t w, coord_t h);
+  // Returns false, leaving the bitmap unchanged, if memory runs out
+  bool resizeToLVGL(coord_t w, coord_t h);
 
   coord_t drawSizedText(coord_t x, coord_t y, const char* s, uint8_t len,
                         LcdFlags flags = 0);
@@ -143,6 +144,7 @@ class BitmapBuffer
 
   inline uint16_t width() const { return _width; }
   inline uint16_t height() const { return _height; }
+  inline uint8_t getFormat() const { return format; }
 
   inline pixel_t* getData() const { return data; }
 
