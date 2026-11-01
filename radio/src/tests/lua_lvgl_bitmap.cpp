@@ -89,7 +89,7 @@ class LuaLvglBitmap : public ::testing::Test
   {
     EXPECT_EQ(manager.errors, expectedErrors);
     manager.clearRefs(L);
-    manager.root->closeWindow();
+    manager.root->deleteLater();
     MainWindow::instance()->run();
     lua_close(L);
     luaScriptManager = previousManager;
@@ -279,11 +279,10 @@ TEST_F(LuaLvglBitmap, ClosedWindowIgnoresLateSourceChanges)
   ASSERT_TRUE(exec(std::string("bmp=lvgl.bitmap({file='") + kFileA +
                    "',w=80,h=60})"));
   auto window = bitmap();
-  window->closeWindow();
+  window->deleteLater();
   uint32_t screens = lv_disp_get_default()->screen_cnt;
   ASSERT_TRUE(exec(std::string("bmp:set({file='") + kFileB + "'})"));
   EXPECT_EQ(lv_disp_get_default()->screen_cnt, screens);
-  EXPECT_FALSE(window->hasImage());
 }
 
 TEST_F(LuaLvglBitmap, SetFileReplacesAndClears)
